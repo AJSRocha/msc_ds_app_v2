@@ -1,0 +1,12 @@
+name: msc_ds_app_v2
+title: msc_ds_app_v2
+username: albertorocha
+account: albertorocha
+server: shinyapps.io
+hostUrl: https://api.shinyapps.io/v1
+appId: 9784239
+bundleId: 7652733
+url: https://albertorocha.shinyapps.io/msc_ds_app_v2/
+version: 1
+asMultiple: FALSE
+asStatic: FALSE

@@ -1,0 +1,149 @@
+---
+title: "Octopus trend simulator 3000"
+output: 
+  flexdashboard::flex_dashboard:
+    theme: lumen
+    # temas: default, cerulean, journal, flatly, darkly, readable, spacelab, 
+      # united, cosmo, lumen, paper, sandstone, simplex, yeti
+    orientation: rows
+    vertical_layout: fill
+    social: ["twitter", "facebook", "menu"]
+    name: 'IPMA'
+    source_code: embed
+runtime: shiny
+---
+
+```{r setup, include=FALSE}
+library(flexdashboard) #front-end
+library(knitr)
+library(DT)
+library(rpivotTable)
+library(ggplot2)
+library(gridExtra)
+library(plotly)
+library(dplyr)
+library(openintro)
+library(highcharter)
+library(ggvis)
+library(leaflet) #mapas
+library(sp)
+library(shiny) #interface c user
+library(zoo) #manipular datas
+library(dplyr)
+library(trend)
+
+# usado para box-jenkins
+# library(forecast)
+# library(astsa)
+
+# JABBA
+library(JABBA)
+
+# usado para spict
+library(TMB)
+library(spict)
+```
+
+```{r load_data}
+load('./app_data/data.Rdata')
+
+# Devemos acrescentar 'runtime:shiny' para correr imediatamente a app; para fazer knit e produzir os html necessarios para o github pages, basta tirar essa linha. Quando se reinstala ou actualiza algum package, reiniciar Rstudio antes de fazer publish se não ocorre um bug com as contas.
+```
+
+JABBA {data-icon="fa-home"}
+================================
+
+Column {.sidebar}
+------------------------------------------------------
+
+### Inputs
+
+```{r}
+selectInput('region',
+            label = 'Region',
+            choices = c('1-Western Coast','2-Southern Coast'),
+            selected = '1-Southern Coast')
+selectInput('fleet',
+            label = 'Fleet',
+            choices = c('1-Polyvalent', '2-Bottom Trawl'),
+            selected = '1-Polyvalent')
+selectInput('model',
+            label = 'Formulation',
+            choices = c('Schaefer', 'Pella', 'Fox'),
+            selected = 'Schaefer')
+numericInput('jabba_p_lim',
+            label = 'P_lim',
+            value = 0.5)
+
+dados = reactive({
+  df_effort_y %>% filter(fill == paste(input$region, input$fleet))
+})
+
+jbinput = reactive({
+  build_jabba(catch = data.frame('Year' = dados()$year_sale %>% as.numeric(),
+                                         'mis' = dados()$catch),
+                      cpue = data.frame('Year' = dados()$year_sale %>% as.numeric(),
+                                        'mis' = dados()$lpue),
+                      se = data.frame('Year' = dados()$year_sale %>% as.numeric(),
+                                        'mis' = log(dados()$sd/dados()$lpue)),
+                      scenario = 'TestRun',
+                      model.type = input$model,
+                      sigma.est = F,
+                      fixed.obsE = 0.01,
+                      Plim = input$jabba_p_lim)
+})
+  
+bet_total = reactive({
+  fit_jabba(jbinput(),
+                    ni = 30000, #number of iterations 
+                    nt = 5, # thinning interval of saved iterations
+                    nb = 5000, #burn-in
+                    nc = 2, #number of mcmc chains initial values
+                    init.values = FALSE, # 
+                    init.K = NULL,
+                    init.r = 0.81,
+                    init.q = NULL,
+                    peels = NULL, # NULL, # retro peel option
+                    do.ppc = TRUE, # conducts and saves posterior predictive checks
+                    save.trj = TRUE, # adds posteriors of stock, harvest and bk trajectories
+                    save.all = FALSE, # add complete posteriors to fitted object
+                    save.jabba = FALSE, # saves jabba fit as rdata object
+                    save.csvs = FALSE, # option to write csv outputs
+                    # output.dir = '/',
+                    quickmcmc = TRUE,
+                    seed = 123,
+                    jagsdir = NULL,
+                    verbose = TRUE)  
+
+})
+```
+
+Row { data-height=20 }
+--------------------------------
+
+### Portuguese Coast, 1995-2022
+```{r}
+valueBox(paste("Octopus Fisheries in Portugal"),
+         color="steelblue")
+```
+
+
+Row {data-width=325}
+--------------------------------
+
+### Grafico sexy
+
+```{r}
+renderPlot({
+par(mfrow = c(2,2), mar = c(5, 5, 5, 5))
+jbplot_trj(bet_total(),type="BBmsy", add = T)
+jbplot_trj(bet_total(),type="FFmsy", add = T)
+jbplot_kobe(bet_total(), add = T)
+jbplot_spphase(bet_total(), add = T)
+})
+```
+
+
+```
+
+

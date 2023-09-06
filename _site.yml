@@ -1,0 +1,7 @@
+name: 'msc_ds_thesis'
+output_dir: docs
+navbar:
+  title: "Website"
+  left:
+    - text: "Overview"
+      href: index.Rmd
