@@ -36,6 +36,15 @@ library(trend)
 # library(forecast)
 # library(astsa)
 
+# CMSY
+library(R2jags)  # Interface with JAGS
+library(coda)
+library(gplots)
+library(mvtnorm)
+library(snpar)
+library(neuralnet)
+library(conicfit)
+
 # JABBA
 library(JABBA)
 
@@ -49,6 +58,1257 @@ load('./app_data/data.Rdata')
 
 # Devemos acrescentar 'runtime:shiny' para correr imediatamente a app; para fazer knit e produzir os html necessarios para o github pages, basta tirar essa linha. Quando se reinstala ou actualiza algum package, reiniciar Rstudio antes de fazer publish se não ocorre um bug com as contas.
 ```
+
+CMSY++ {data-icon="fa-home"}
+================================
+
+Column {.sidebar}
+------------------------------------------------------
+
+### Inputs
+
+```{r}
+selectInput('cmsy_region',
+            label = 'Region',
+            choices = c('1-Western Coast','2-Southern Coast'),
+            selected = '1-Southern Coast')
+selectInput('cmsy_fleet',
+            label = 'Fleet',
+            choices = c('1-Polyvalent', '2-Bottom Trawl'),
+            selected = '1-Polyvalent')
+
+# numericInput('jabba_p_lim',
+#             label = 'P_lim',
+#             value = 0.5)
+
+# cmsy_dados = reactive({
+#   df_effort_y %>% filter(fill == paste(input$cmsy_region, input$cmsy_fleet))
+# })
+
+# SETUP CMSY++
+options(digits = 3) 
+FullSchaefer = F
+n.chains   = 2
+
+id = reactive({
+  data.frame(Continent = 'Europe',
+                Region = 'Iberia',
+                Subregion = 'Portugal',
+                Stock = paste(input$cmsy_region, input$cmsy_fleet),
+                Group = 'Cephalopoda',
+                Name = 'Octopus',
+                ScientificName = 'Octopus vulgaris',
+                SpecCode = 'OCC',
+                Source = 'DGRM',
+                MinOfYear = 1995,
+                MaxOfYear = 2022,
+                StartYear = 1995,
+                EndYear = 2022,
+                Flim = '',
+                Fpa = '',
+                Blim = '',
+                Bmsy = '',
+                MSYBtrigger = '',
+                Fmsy = '',
+                last_F = '',
+                Resilience = 'High', #"High”, “Medium”, “Low”, “Very Low”
+                r.low = NA,
+                r.high = NA,
+                stb.low = NA,
+                stb.hi = NA,
+                int.yr = NA,
+                intb.low = NA,
+                intb.hi = NA,
+                endb.low = NA,
+                endb.hi = NA,
+                e.creep = TRUE,
+                btype = 'CPUE', # 'CPUE', 'None', 'biomass'
+                force.cmsy = FALSE,
+                Comment = '')
+})
+
+catch = reactive({
+  data.frame(Stock = df_effort_y$fill,
+  # Stock = rep('occ.27.9.a.s.a.mis', nrow(effort_ns)),
+                   yr = df_effort_y$year_sale %>% as.character() %>% as.numeric(),
+                   ct = df_effort_y$catch/1000,
+                   bt = df_effort_y$effort)
+})
+
+nn_file     =  "cmsy/ffnn.bin" # file containing neural networks trained to estimate B/k priors
+outfile     = paste("Out_",format(Sys.Date(),format="%B%d%Y_"),'text_goes_here',sep="") # default name for output file
+
+stocks = reactive({paste(input$cmsy_region, input$cmsy_fleet)})
+
+#-----------------------------------------
+# General settings for the analysis ----
+#-----------------------------------------
+CV.C         <- 0.15  #><>MSY: Add Catch CV
+CV.cpue      <- 0.2 #><>MSY: Add minimum realistic cpue CV
+sigmaR       <- 0.1 # overall process error for CMSY; SD=0.1 is the default
+cor.log.rk   <- -0.76 # empirical value of log r-k correlation in 250 stocks analyzed with BSM (without r-k correlation), used only in graph
+rk.cor.beta  <- c(2.52,3.37) # beta.prior for rk cor+1
+nbk          <- 3 # Number of B/k priors to be used by BSM, with options 1 (first year), 2 (first & intermediate), 3 (first, intermediate & final bk priors)
+bt4pr        <- F # if TRUE, available abundance data are used for B/k prior settings
+auto.start   <- F # if TRUE, start year will be set to first year with intermediate catch to avoid ambiguity between low and high bimass if catches are very low
+ct_MSY.lim   <- 1.21  # ct/MSY.pr ratio above which B/k prior is assumed constant
+q.biomass.pr <- c(0.9,1.1) # if btype=="biomass" this is the prior range for q
+n            <- 5000 # number of points in multivariate cloud in graph panel (b)
+ni           <- 3 # iterations for r-k-startbiomass combinations, to test different variability patterns; no improvement seen above 3
+nab          <- 3 # recommended=5; minimum number of years with abundance data to run BSM
+bw           <- 3 # default bandwidth to be used by ksmooth() for catch data
+mgraphs      <- T # set to TRUE to produce additional graphs for management
+e.creep.line <- T # set to TRUE to display uncorrected CPUE in biomass graph
+kobe.plot    <- T # set to TRUE to produce additional kobe status plot; management graph needs to be TRUE for Kobe to work
+BSMfits.plot <- T # set to TRUE to plot fit diagnostics for BSM
+pp.plot      <- T # set to TRUE to plot Posterior and Prior distributions for CMSY and BSM
+rk.diags     <- T #><>MSY set to TRUE to plot diagnostic plot for r-k space
+retros       <- F # set to TRUE to enable retrospective analysis (1-3 years less in the time series)
+save.plots   <- F # set to TRUE to save graphs to JPEG files
+close.plots  <- F # set to TRUE to close on-screen plots after they are saved, to avoid "too many open devices" error in batch-processing
+write.output <- F # set to TRUE if table with results in output file is wanted; expects years 2004-2014 to be available
+write.pdf    <- F # set to TRUE if PDF output of results is wanted. See more instructions at end of code.
+select.yr    <- NA # option to display F, B, F/Fmsy and B/Bmsy for a certain year; default NA
+write.rdata  <- F #><>HW write R data file
+
+#----------------------------------------------
+#  FUNCTIONS ----
+#----------------------------------------------
+#------------------------------------------------------------------------------------
+# Function to create multivariate-normal distribution for r-k, used only in graphs
+#------------------------------------------------------------------------------------
+mvn   <- function(n,mean.log.r,sd.log.r,mean.log.k,sd.log.k) {
+  cov.log.rk <- cor.log.rk*sd.log.r*sd.log.k # covariance with empirical correlation and prior variances  covar.log.rk = matrix(NA, ncol=2,nrow=2)   # contract covariance matrix
+  covar.log.rk      <- matrix(NA, ncol=2,nrow=2) # covariance matrix
+  covar.log.rk[1,1] <- sd.log.r^2                # position [1,1] is variance of log.r
+  covar.log.rk[2,2] <- sd.log.k^2               # position [2,2] is variance of log.k
+  covar.log.rk[1,2] = covar.log.rk[2,1] = cov.log.rk     # positions [1,2] and [2,1] are correlations
+  mu.log.rk  <- (c(mean.log.r,mean.log.k))      # vector of log.means
+  mvn.log.rk <- rmvnorm(n,mean=mu.log.rk,sigma=covar.log.rk,method="svd")
+  return(mvn.log.rk)
+}
+
+#-------------------------------------------------------------
+# Function to run Bayesian Schaefer Model (BSM)
+#-------------------------------------------------------------
+bsm   <- function(ct,btj,nyr,prior.r,prior.k,startbio,q.priorj,
+                  init.q,init.r,init.k,pen.bk,pen.F,b.yrs,b.prior,CV.C,CV.cpue,nbk,rk.cor.beta,cmsyjags) {
+  #><> convert b.prior ranges into beta priors
+  bk.beta = beta.prior(b.prior)
+
+  if(cmsyjags==TRUE ){ nbks=3 } else {nbks = nbk} # Switch between CMSY + BSM
+
+  # Data to be passed on to JAGS
+  jags.data        <- c('ct','btj','nyr', 'prior.r', 'prior.k', 'startbio', 'q.priorj',
+                        'init.q','init.r','init.k','pen.bk','pen.F','b.yrs','bk.beta','CV.C','CV.cpue','nbks','rk.cor')
+  # Parameters to be returned by JAGS #><> HW add key quantaties
+  jags.save.params <- c('r','k','q', 'P','ct.jags','cpuem','proc.logB','B','F','BBmsy','FFmsy','ppd.logrk')
+
+  # JAGS model ----
+  Model = "model{
+    # to reduce chance of non-convergence, Pmean[t] values are forced >= eps
+    eps<-0.01
+    #><> Add Catch.CV
+    for(t in 1:nyr){
+      ct.jags[t] ~ dlnorm(log(ct[t]),pow(CV.C,-2))
+    }
+
+    penm[1]  <- 0 # no penalty for first biomass
+    Pmean[1] <- log(alpha)
+    P[1]     ~ dlnorm(Pmean[1],itau2)
+
+    for (t in 2:nyr) {
+      Pmean[t] <- ifelse(P[t-1] > 0.25,
+        log(max(P[t-1] + r*P[t-1]*(1-P[t-1]) - ct.jags[t-1]/k,eps)),  # Process equation
+        log(max(P[t-1] + 4*P[t-1]*r*P[t-1]*(1-P[t-1]) - ct.jags[t-1]/k,eps))) # linear decline of r at B/k < 0.25
+      P[t]     ~ dlnorm(Pmean[t],itau2) # Introduce process error
+      penm[t]  <- ifelse(P[t]<(eps+0.001),log(q*k*P[t])-log(q*k*(eps+0.001)),
+                   # ifelse(P[t]>1,ifelse((ct[t]/max(ct))>0.2,log(q*k*P[t])-log(q*k*(0.99)),0),0)) # penalty if Pmean is outside viable biomass
+                    ifelse(P[t]>1.1,log(q*k*P[t])-log(q*k*(0.99)),0))
+    }
+
+    # Get Process error deviation
+    for(t in 1:nyr){
+      proc.logB[t] <- log(P[t]*k)-log(exp(Pmean[t])*k)}
+
+    # ><> b.priors with penalties
+    # Biomass priors/penalties are enforced as follows
+    for(i in 1:nbks){
+    bk.mu[i] ~ dbeta(bk.beta[1,i],bk.beta[2,i])
+    bk.beta[3,i] ~ dnorm(bk.mu[i]-P[b.yrs[i]],10000)
+    }
+
+    for (t in 1:nyr){
+      Fpen[t]   <- ifelse(ct[t]>(0.9*k*P[t]),ct[t]-(0.9*k*P[t]),0) # Penalty term on F > 1, i.e. ct>B
+      pen.F[t]  ~ dnorm(Fpen[t],1000)
+      pen.bk[t] ~ dnorm(penm[t],10000)
+      cpuem[t]  <- log(q*P[t]*k);
+      btj[t]     ~ dlnorm(cpuem[t],pow(sigma2,-1));
+    }
+
+  # priors
+  log.alpha               <- log((startbio[1]+startbio[2])/2) # needed for fit of first biomass
+  sd.log.alpha            <- (log.alpha-log(startbio[1]))/4
+  tau.log.alpha           <- pow(sd.log.alpha,-2)
+  alpha                   ~  dlnorm(log.alpha,tau.log.alpha)
+
+  # set realistic prior for q
+  log.qm              <- mean(log(q.priorj))
+  sd.log.q            <- (log.qm-log(q.priorj[1]))/2
+  tau.log.q           <- pow(sd.log.q,-2)
+  q                   ~  dlnorm(log.qm,tau.log.q)
+
+  # define process (tau) and observation (sigma) variances as inversegamma priors
+  itau2 ~ dgamma(4,0.01)
+  tau2  <- 1/itau2
+  tau   <- pow(tau2,0.5)
+
+  isigma2 ~ dgamma(2,0.01)
+  sigma2 <- 1/isigma2+pow(CV.cpue,2) # Add minimum realistic CPUE CV
+  sigma  <- pow(sigma2,0.5)
+
+  log.rm              <- mean(log(prior.r))
+  sd.log.r            <- abs(log.rm - log(prior.r[1]))/2
+  tau.log.r           <- pow(sd.log.r,-2)
+
+  # bias-correct lognormal for k
+  log.km              <- mean(log(prior.k))
+  sd.log.k            <- abs(log.km-log(prior.k[1]))/2
+  tau.log.k           <- pow(sd.log.k,-2)
+
+  # Construct Multivariate lognormal (MVLN) prior
+  mu.rk[1] <- log.rm
+  mu.rk[2] <- log.km
+
+  # Prior for correlation log(r) vs log(k)
+  #><>MSY: now directly taken from mvn of ki = 4*msyi/ri
+  rho <- rk.cor
+
+  # Construct Covariance matrix
+  cov.rk[1,1] <- sd.log.r * sd.log.r
+  cov.rk[1,2] <- rho
+  cov.rk[2,1] <- rho
+  cov.rk[2,2] <- sd.log.k * sd.log.k
+
+  # MVLN prior for r-k
+  log.rk[1:2] ~ dmnorm(mu.rk[],inverse(cov.rk[,]))
+  r <- exp(log.rk[1])
+  k <- exp(log.rk[2])
+
+  #><>MSY get posterior predictive distribution for rk
+  ppd.logrk[1:2] ~ dmnorm(mu.rk[],inverse(cov.rk[,]))
+
+  # ><>HW: Get B/Bmsy and F/Fmsy directly from JAGS
+  Bmsy <- k/2
+  Fmsy <- r/2
+  for (t in 1:nyr){
+  B[t] <- P[t]*k # biomass
+  F[t] <- ct.jags[t]/B[t]
+  BBmsy[t] <- P[t]*2 #true for Schaefer
+  FFmsy[t] <- ifelse(BBmsy[t]<0.5,F[t]/(Fmsy*2*BBmsy[t]),F[t]/Fmsy)
+  }
+} "    
+  
+  cat(Model, file="r2jags.bug")
+
+  #><>MSY: change to lognormal inits (better)
+  j.inits <- function(){list("log.rk"=c(rnorm(1,mean=log(init.r),sd=0.2),rnorm(1,mean=log(init.k),sd=0.1)),
+                             "q"=rlnorm(1,mean=log(init.q),sd=0.2),"itau2"=1000,"isigma2"=1000)}
+  # run model ----
+  jags_outputs <- jags.parallel(data=jags.data,
+                                working.directory=NULL, inits=j.inits,
+                                parameters.to.save=jags.save.params,
+                                model.file="r2jags.bug", n.chains = n.chains,
+                                n.burnin = 30000, n.thin = 10,
+                                n.iter = 60000)
+  return(jags_outputs)
+}
+
+get_beta <- function(mu,CV,Min=0,Prior="x",Plot=FALSE){
+  a = seq(0.0001,1000,0.001)
+  b= (a-mu*a)/mu
+  s2 = a*b/((a+b)^2*(a+b+1))
+  sdev = sqrt(s2)
+  # find beta parameter a
+  CV.check = (sdev/mu-CV)^2
+  a = a[CV.check==min(CV.check)]
+  # find beta parameter b
+  b = (a-mu*a)/mu
+  x = seq(Min,1,0.001)
+  pdf = dbeta(x,a,b)
+  if(Plot==TRUE){
+    plot(x,pdf,type="l",xlim=range(x[pdf>0.01]),xlab=paste(Prior),ylab="",yaxt="n")
+    polygon(c(x,rev(x)),c(rep(0,length(x)),rev(ifelse(pdf==Inf,100000,pdf))),col="grey")
+  }
+  return(c(a,b))
+}
+
+#><> convert b.prior ranges into beta priors
+beta.prior = function(b.prior){
+  bk.beta = matrix(0,nrow = 3,ncol=3)
+  for(i in 1:3){
+    sd.bk = (b.prior[2,i]-b.prior[1,i])/(4*0.98)
+    mu.bk = mean(b.prior[1:2,i])
+    cv.bk = sd.bk/mu.bk
+    bk.beta[1:2,i] = get_beta(mu.bk,cv.bk)
+  }
+  return(bk.beta)
+}
+
+#Fits an ellipse around the CMSY r-k cloud and estimates the rightmost focus
+traceEllipse<-function(rs,ks,prior.r,prior.k){
+  log.rs<-log(rs)
+  log.ks<-log(ks)
+
+#  #select data within the bounding box
+#  log.rs<-log.rs[which(rs>prior.r[1] & rs<prior.r[2] &
+#                         ks>prior.k[1] & ks<prior.k[2]
+#  )]
+#  log.ks<-log.ks[which(rs>prior.r[1] & rs<prior.r[2] &
+#                         ks>prior.k[1] & ks<prior.k[2]
+#  )]
+
+  #prepare data for ellipse fitting
+  cloud.data <- as.matrix(data.frame(x = log.rs, y = log.ks))
+  ellip <- EllipseDirectFit(cloud.data)
+  #estimate ellipse characteristics
+  atog<-AtoG(ellip)
+  ellipG <- atog$ParG
+  ell.center.x<-ellipG[1]
+  ell.center.y<-ellipG[2]
+  ell.axis.a<-ellipG[3]
+  ell.axis.b<-ellipG[4]
+  ell.tilt.angle.deg<-180/pi*ellipG[5]
+  ell.slope<-tan(ellipG[5])
+  xy.ell<-calculateEllipse(ell.center.x,
+                           ell.center.y,
+                           ell.axis.a,
+                           ell.axis.b,
+                           ell.tilt.angle.deg)
+  #draw ellipse
+  #points(x=xy.ell[,1],y=xy.ell[,2],col='red',type='l')
+  ell.intercept.1 = ell.center.y-ell.center.x*ell.slope
+  #draw ellipse main axis
+  #abline(a =ell.intercept.1, b=ell.slope,col='red')
+  #calculate focus from demi-axes
+  ell.demiaxis.c.sqr<-(0.25*ell.axis.a*ell.axis.a)-(0.25*ell.axis.b*ell.axis.b)
+  if (ell.demiaxis.c.sqr<0)
+    ell.demiaxis.c.sqr<-ell.axis.a/2
+  else
+    ell.demiaxis.c<-sqrt(ell.demiaxis.c.sqr)
+  sin.c<-ell.demiaxis.c*sin(ellipG[5])
+  cos.c<-ell.demiaxis.c*cos(ellipG[5])
+  ell.foc.y<-ell.center.y-sin.c
+  ell.foc.x<-ell.center.x-cos.c
+
+
+  return (c(exp(ell.foc.x),exp(ell.foc.y)))
+}
+#---------------------------------------------
+# END OF FUNCTIONS
+#---------------------------------------------
+
+cat("-------------------------------------------\n")
+cat("CMSY++ Analysis,", date(),"\n")
+cat("-------------------------------------------\n")
+
+
+# cdat = catch()
+# cinfo = id()
+# id_file = 'train_occ' #artificio para ultrapassar a distincao train/sim que o script faz abaixo
+# load(file = nn_file) # load neural network file
+
+
+
+#---------------------------------
+# Analyze stock(s)
+#---------------------------------
+# reactive({
+# if(is.na(stocks()[1])==TRUE){
+#   # stocks         <- as.character(cinfo$Stock) # Analyze stocks in sequence of ID file
+#   # stocks         <- sort(as.character(cinfo$Stock[cinfo$Stock>="Cras_vir_Virginian"])) # Analyze in alphabetic order after a certain stock
+#    stocks         <- sort(as.character(cinfo$Stock)) # Analyze stocks in alphabetic order
+#   # stocks         <- as.character(cinfo$Stock[cinfo$btype!="None" & cinfo$Stock>"Squa_aca_BlackSea"]) # Analyze stocks by criteria in ID file
+# }})
+# 
+# reactive({
+# for(stock in stocks()) {
+# 
+#   cat("Processing",stock,",", as.character(cinfo$ScientificName[cinfo$Stock==stock]),"\n")
+# 
+#   #retrospective analysis
+#   retros.nyears<-ifelse(retros==T,3,0) #retrospective analysis
+#   FFmsy.retrospective<-list() #retrospective analysis
+#   BBmsy.retrospective<-list() #retrospective analysis
+#   years.retrospective<-list() #retrospective analysis
+# 
+#   retrosp.step =0
+#   for (retrosp.step in 0:retros.nyears){ #retrospective analysis loop
+# 
+#   # Declare conditional Objects that feature with ifelse clauses
+#     B.sel        <- NULL
+#     B.Bmsy.sel   <- NULL
+#     F.sel        <- NULL
+#     F.Fmsy.sel   <- NULL
+#     true.MSY     <- NULL
+#     true.r       <- NULL
+#     true.k       <- NULL
+#     true.Bk      <- NULL
+#     true.F_Fmsy  <- NULL
+#     true.q       <- NULL
+# 
+#   # assign data from cinfo to vectors
+#     btype        <- as.character(cinfo$btype[cinfo$Stock==stock])
+#     res          <- as.character(cinfo$Resilience[cinfo$Stock==stock])
+#     start.yr     <- as.numeric(cinfo$StartYear[cinfo$Stock==stock])
+#     end.yr       <- as.numeric(cinfo$EndYear[cinfo$Stock==stock])
+#     end.yr.orig  <- end.yr
+#     end.yr 	     <- end.yr-retrosp.step #retrospective analysis
+#     yr           <- as.numeric(cdat$yr[cdat$Stock==stock & cdat$yr >= start.yr & cdat$yr <= end.yr])
+#     if(length(yr)==0){
+#       cat("ERROR: Could not find the stock in the Catch file -
+#       check that the stock names match in ID and Catch files and that commas are used (not semi-colon)")
+#       return (NA) }
+# 
+#     # code to change start year to avoid ambiguity in biomass prior -----------------------------------------
+#     ct.raw       <- as.numeric(cdat$ct[cdat$Stock==stock & cdat$yr >= start.yr & cdat$yr <= end.yr])/1000  ## assumes that catch is given in tonnes, transforms to '000 tonnes
+#     ct           <- ksmooth(x=yr,y=ct.raw,kernel="normal",n.points=length(yr),bandwidth=bw)$y
+#     ct.3         <- mean(ct[1:3])
+#     max.ct       <- max(ct)
+# 
+#     if(btype=="biomass" | btype=="CPUE" ) {
+#       bt.raw1 <- as.numeric(cdat$bt[cdat$Stock==stock & cdat$yr >= start.yr & cdat$yr <= end.yr])
+#       # if bt.raw is zero, change to NA
+#       bt.raw1[bt.raw1==0] <- NA
+#       if(btype=="biomass") { # make sure both catch and biomass are divided by 1000
+#         bt <- bt.raw1/1000 } else { # get number of integer digits for bt.raw (because sometimes they give numbers of eggs!)
+#           bt.digits <- floor(log10(mean(bt.raw1,na.rm=T)))+1
+#           if(bt.digits>3) {bt.raw <- bt.raw1/10^(bt.digits-1)} else {bt.raw <- bt.raw1}
+#           bt     <- bt.raw #ksmooth(x=yr,y=bt.raw,kernel="normal",n.points=length(yr),bandwidth=3)$y
+#         } # end of bt==CPUE loop
+#       if(length(bt[is.na(bt)==F])==0) {
+#         cat("ERROR: No CPUE or biomass data in the Catch input file")
+#         return (NA) }
+#     } else {bt <- NA; bt.raw <- NA} # if there is no biomass or CPUE, set bt to NA
+# 
+# 
+#     # code to change start year to avoid ambiguity in biomass prior -----------------------------------------
+#     start.yr.new <- NA # initialize / reset start.yr.new with NA
+#     if(is.na(cinfo$stb.low[cinfo$Stock==stock]) & ct.3 < (0.33*max.ct) & start.yr < 2000 & (btype=="None" || yr[is.na(bt)==F][1]>yr[3])) { # it is unlikely that a fishery started on an unexploited stock after 2000
+#       start.yr.new <- yr[which(ct >= (0.4*max.ct))][1]
+#       cat("\n          *****************************************************************************************
+#           Attention: Low catch in",start.yr,"may indicate either depleted or unexploited biomass.
+#           Set startbio in ID file to 0.01-0.2 or 0.8-1.0 to indicate depleted or unexploited biomass.\n")
+#       if(auto.start==T) { # change start year automatically if auto.start is TRUE
+#         start.yr  <- start.yr.new
+#         cat("          Meanwhile start year was set to",start.yr,"to avoid ambiguity.\n")
+#       } else {
+#         cat("          Else, set start year in ID file to",start.yr.new,"to avoid uncertainty\n")
+#       }
+#       cat("          ******************************************************************************************\n\n") }
+#     # end of code for start biomass prior ambiguity
+# 
+#     ename        <- cinfo$Name[cinfo$Stock==stock]
+#     r.low        <- as.numeric(cinfo$r.low[cinfo$Stock==stock])
+#     r.hi         <- as.numeric(cinfo$r.hi[cinfo$Stock==stock])
+#     stb.low      <- as.numeric(cinfo$stb.low[cinfo$Stock==stock])
+#     stb.hi       <- as.numeric(cinfo$stb.hi[cinfo$Stock==stock])
+#     int.yr       <- as.numeric(cinfo$int.yr[cinfo$Stock==stock])
+#     intb.low     <- as.numeric(cinfo$intb.low[cinfo$Stock==stock])
+#     intb.hi      <- as.numeric(cinfo$intb.hi[cinfo$Stock==stock])
+#     endb.low     <- as.numeric(cinfo$endb.low[cinfo$Stock==stock])
+#     endb.hi      <- as.numeric(cinfo$endb.hi[cinfo$Stock==stock])
+#     e.creep      <- as.numeric(cinfo$e.creep[cinfo$Stock==stock])
+#     force.cmsy   <- cinfo$force.cmsy[cinfo$Stock==stock]
+#     comment      <- as.character(cinfo$Comment[cinfo$Stock==stock])
+#     source       <- as.character(cinfo$Source[cinfo$Stock==stock])
+#     # set global defaults for uncertainty
+#     sigR         <- sigmaR
+#     # for simulated data only
+#     if(substr(id_file,1,3)=="Sim") {
+#       true.MSY     <- cinfo$true.MSY[cinfo$Stock==stock]/1000
+#       true.r       <- cinfo$true.r[cinfo$Stock==stock]
+#       true.k       <- cinfo$true.k[cinfo$Stock==stock]/1000
+#       true.Bk      <- (cinfo$last.TB[cinfo$Stock==stock]/1000)/true.k
+#       true.F_Fmsy  <- cinfo$last.F_Fmsy[cinfo$Stock==stock]
+#       true.q       <- cinfo$last.cpue[cinfo$Stock==stock]/cinfo$last.TB[cinfo$Stock==stock]
+#     }
+#     # do retrospective analysis
+#     if (retros==T && retrosp.step==0){
+#       cat("* ",ifelse(btype!="None","BSM","CMSY")," retrospective analysis for ",
+#           stock," has been enabled\n",sep="") #retrospective analysis
+#     }
+#     if (retros==T){
+#       cat("* Retrospective analysis: step n. ",(retrosp.step+1),"/",(retros.nyears+1),
+#           ". Range of years: [",start.yr ," - ",end.yr,"]\n",sep="") #retrospective analysis
+#     }
+# 
+#     # -------------------------------------------------------------
+#     # check for common errors
+#     #--------------------------------------------------------------
+#     if(length(btype)==0){
+#       cat("ERROR: Could not find the stock in the ID input file - check that the stock names match in ID and Catch files and that commas are used (not semi-colon)")
+#       return (NA) }
+#     if(start.yr < cdat$yr[cdat$Stock==stock][1]){
+#       cat("ERROR: start year in ID file before first year in catch file\n")
+#       return (NA)
+#       break}
+#     if(length(yr)==0){
+#       cat("ERROR: Could not find the stock in the Catch input files - Please check that the code is written correctly")
+#       return (NA) }
+#     if(btype %in% c("None","CPUE","biomass")==FALSE){
+#       cat("ERROR: In ID file, btype must be None, CPUE, or biomass.")
+#       return (NA) }
+#     if(retros==F & length(yr) != (end.yr-start.yr+1)) {
+#       cat("ERROR: indicated year range is of different length than years in catch file\n")
+#       return (NA)}
+#     if(length(ct.raw[ct.raw>0])==0) {
+#       cat("ERROR: No catch data in the Catch input file")
+#       #return (NA)
+#       next }
+#     if(is.na(int.yr)==F & (int.yr < start.yr | int.yr > end.yr)) {
+#       cat("ERROR: year for intermediate B/k prior outside range of years")
+#       return (NA)}
+#     if(is.na(int.yr)==T & (is.na(intb.low)==F | is.na(intb.hi)==F)) {
+#         cat("ERROR: intermediate B/k prior given without year")
+#         return (NA)}
+# 
+#     # apply correction for effort-creep to commercial(!) CPUE
+#     if(btype=="CPUE" && is.na(e.creep)==FALSE) {
+#       cpue.first  <- min(which(is.na(bt)==F))
+#       cpue.last   <- max(which(is.na(bt)==F))
+#       cpue.length <- cpue.last - cpue.first
+#       bt.cor      <- bt
+#       for(i in 1:(cpue.length)) {
+#         bt.cor[cpue.first+i]  <- bt[cpue.first+i]*(1-e.creep/100)^i # equation for decay in %
+#       }
+#       bt <- bt.cor
+#     }
+# 
+#     if(retros==T && force.cmsy == F && (btype !="None" & length(bt[is.na(bt)==F])<nab) ) { #stop retrospective analysis if cpue is < nab
+#       cat("Warning: Cannot run retrospective analysis for ",end.yr,", number of remaining ",btype," values is too low (<",nab,")\n",sep="")
+#       #retrosp.step<-retros.nyears
+#       break }
+# 
+#     if(is.na(mean(ct.raw))){
+#       cat("ERROR: Missing value in Catch data; fill or interpolate\n")
+#     }
+#     nyr          <- length(yr) # number of years in the time series
+# 
+# 
+#     # initialize vectors for viable r, k, bt, and all in a matrix
+#     mdat.all    <- matrix(data=vector(),ncol=2+nyr+1)
+# 
+#     # initialize other vectors anew for each stock
+#     current.attempts <- NA
+# 
+#     # use start.yr if larger than select year
+#     if(is.na(select.yr)==F) {
+#       sel.yr <- ifelse(start.yr > select.yr,start.yr,select.yr)
+#     } else sel.yr <- NA
+# 
+#     #----------------------------------------------------
+#     # Determine initial ranges for parameters and biomass
+#     #----------------------------------------------------
+#     if(!(res %in% c("High","Medium","Low","Very low"))) {
+#       cat("ERROR: Resilience not High, Medium, Low, or Very low in ID input file")
+#       return (NA)} else {
+#     # initial range of r from input file
+#     if(is.na(r.low)==F & is.na(r.hi)==F) {
+#       prior.r <- c(r.low,r.hi)
+#     } else
+#       # initial range of r based on resilience
+#       if(res == "High") {
+#         prior.r <- c(0.6,1.5)} else if(res == "Medium") {
+#           prior.r <- c(0.2,0.8)}    else if(res == "Low") {
+#             prior.r <- c(0.05,0.5)}  else { # i.e. res== "Very low"
+#               prior.r <- c(0.015,0.1)}
+#     }
+#     gm.prior.r      <- exp(mean(log(prior.r))) # get geometric mean of prior r range
+# 
+#     #-----------------------------------------
+#     # determine MSY prior
+#     #-----------------------------------------
+#     # get index of years with lowest and highest catch
+#     min.yr.i     <- which.min(ct)
+#     max.yr.i     <- which.max(ct)
+#     yr.min.ct    <- yr[min.yr.i]
+#     yr.max.ct    <- yr[max.yr.i]
+#     min.ct       <- ct[min.yr.i]
+#     max.ct       <- ct[max.yr.i]
+#     min_max      <- min.ct/max.ct
+#     mean.ct      <- mean(ct)
+#     sd.ct        <- sd(ct)
+# 
+#     ct.sort     <- sort(ct.raw)
+#     # if max catch is reached in last 5 years or catch is flat, assume MSY=max catch
+#     if(max.yr.i>(nyr-4) || ((sd.ct/mean.ct) < 0.1 && min_max > 0.66)) {
+#         MSY.pr <- mean(ct.sort[(nyr-2):nyr]) } else {
+#           MSY.pr <- 0.75*mean(ct.sort[(nyr-4):nyr]) } # else, use fraction of mean of 5 highest catches as MSY prior
+# 
+#     #><>MSY: MSY prior
+#     sd.log.msy.pr <- 0.3 # rounded upward to account for reduced variability in selected stocks
+#     log.msy.pr    <- log(MSY.pr)
+#     prior.msy     <- c(exp(log.msy.pr-1.96*sd.log.msy.pr),exp(log.msy.pr+1.96*sd.log.msy.pr))
+#     init.msy      <- MSY.pr
+# 
+#     #----------------------------------------------------------------
+#     # Multivariate normal sampling of r-k log space
+#     #----------------------------------------------------------------
+#     # turn numerical ranges into log-normal distributions
+#     mean.log.r=mean(log(prior.r))
+#     sd.log.r=(log(prior.r[2])-log(prior.r[1]))/(2*1.96)  # assume range covers 4 SD
+# 
+#     #><>MSY: new k = r-msy space
+#     # generate msy and r independently
+#     ri1     <- rlnorm(n,mean.log.r,sd.log.r)
+#     msyi1  <- rlnorm(n,log.msy.pr,sd.log.msy.pr)
+#     ki1     <- msyi1*4/ri1
+#     #><>MSY: get log median and covariance
+#     cov_rk <- cov(cbind(log(ri1),log(ki1)))
+#     mu_rk <-  apply(cbind(log(ri1),log(ki1)),2,median)
+#     rk.cor <- cov_rk[2,1] #MSY: correlation rho input to JAGS
+#     #><>MSY: mvn prior for k = 4*msy/r
+#     mvn.log.rk <- rmvnorm(n,mean=mu_rk,cov_rk)
+# 
+#     ri2    <- exp(mvn.log.rk[,1])
+#     ki2    <- exp(mvn.log.rk[,2])
+# 
+#     mean.log.k <- median(log(ki1))
+#     sd.log.k.pr <- sd(log(ki1))
+#     # quick check must be the same
+#     sd.log.k = sqrt(cov_rk[2,2])
+#     sd.log.k.pr
+#     sd.log.k
+#     #><>MSY: k.prior
+#     prior.k     <- exp(mean.log.k-1.96*sd.log.k.pr) # declare variable and set prior.k[1] in one step
+#     prior.k[2]  <- exp(mean.log.k+1.96*sd.log.k.pr)
+#     msy.init <- exp(mean.log.k)
+# 
+#     #-----------------------------------------
+#     # determine prior B/k ranges
+#     #-------------------------------------------------
+#     # determine intermediate year int.yr for prior B/k
+#     if(is.na(cinfo$int.yr[cinfo$Stock==stock])==F) {
+#       int.yr <- cinfo$int.yr[cinfo$Stock==stock]     # use int.yr give by user
+#     } else {if(min_max > 0.7) { # if catch is about flat, use middle year as int.yr
+#       int.yr    <- as.integer(mean(c(start.yr, end.yr)))
+#       } else { # only consider catch 5 years away from end points and within last 30 years # 50
+#       yrs.int       <- yr[yr>(yr[nyr]-30) & yr>yr[4] & yr<yr[nyr-4]]
+#       ct.int        <- ct[yr>(yr[nyr]-30) & yr>yr[4] & yr<yr[nyr-4]]
+#       min.ct.int    <- min(ct.int)
+#       min.ct.int.yr <- yrs.int[which.min(ct.int)]
+#       max.ct.int    <- max(ct.int)
+#       max.ct.int.yr <- yrs.int[which.max(ct.int)]
+#       #if min year is after max year, use min year for int year
+#       if(min.ct.int.yr > max.ct.int.yr) { int.yr <- min.ct.int.yr } else {
+#         # if min.ct/max.ct after max.ct < 0.7, use that year for int.yr
+#         min.ct.after.max <- min(ct.int[yrs.int >= max.ct.int.yr])
+#         if((min.ct.after.max/max.ct.int) < 0.75) {
+#           int.yr <- yrs.int[yrs.int > max.ct.int.yr & ct.int==min.ct.after.max]
+#         } else {int.yr <- min.ct.int.yr}
+#       }
+#       # get latest year where ct < 1.2 min ct
+#       # int.yr        <- max(yrs.int[ct.int<=(1.2*min.ct.int)])
+#      }
+#     }# end of int.yr loop
+# 
+#     # get additional properties of catch time series
+#     mean.ct.end       <- mean(ct.raw[(nyr-4):nyr]) # mean of catch in last 5 years
+#     mean.ct_MSY.end   <- mean.ct.end/MSY.pr
+#     # Get slope of catch in last 10 years
+#     ct.last           <- ct[(nyr-9):nyr]/mean(ct) # last catch standardized by mean catch
+#     yrs.last          <- seq(1:10)
+#     fit.last          <- lm(ct.last ~ yrs.last)
+#     slope.last        <- as.numeric(coefficients(fit.last)[2])
+#     slope.last.nrm    <- (slope.last - slope.last.min)/(slope.last.max - slope.last.min) # normalized slope 0-1
+#     # Get slope of catch in first 10 years
+#     ct.first          <- ct[1:10]/mean.ct # catch standardized by mean catch
+#     yrs.first         <- seq(1:10)
+#     fit.first         <- lm(ct.first ~ yrs.first)
+#     slope.first       <- as.numeric(coefficients(fit.first)[2])
+#     slope.first.nrm   <- (slope.first - slope.first.min)/(slope.first.max - slope.first.min) # normalized slope 0-1
+# 
+#     ct_max.1          <- ct[1]/max.ct
+#     ct_MSY.1          <- ct[1]/MSY.pr
+#     mean.ct_MSY.start <- mean(ct.raw[1:5])/MSY.pr
+#     ct_MSY.int        <- ct[which(yr==int.yr)]/MSY.pr
+#     ct_max.end        <- ct[nyr]/max.ct
+#     ct_MSY.end        <- ct[nyr]/MSY.pr
+#     max.ct.i          <- which.max(ct)/nyr
+#     int.ct.i          <- which(yr==int.yr)/nyr
+#     min.ct.i          <- which.min(ct)/nyr
+#     yr.norm           <- (nyr - yr.norm.min)/(yr.norm.max - yr.norm.min) # normalize nyr 0-1
+# 
+#     # classify catch patterns as Flat, LH, LHL, HL, HLH or OTH
+#     if(min_max >=0.45 & ct_max.1 >= 0.45 & ct_max.end >= 0.45) { Flat <- 1 } else Flat <- 0
+#     if(min_max<0.25 & ct_max.1<0.45 & ct_max.end>0.45) { LH <- 1 } else LH <- 0
+#     if(min_max<0.25 & ct_max.1 < 0.45 & ct_max.end < 0.25) { LHL <- 1 } else LHL <- 0
+#     if(min_max<0.25 & ct_max.1 > 0.5 & ct_max.end < 0.25) { HL <- 1 } else HL <- 0
+#     if(min_max<0.25 & ct_max.1 >= 0.45 & ct_max.end >= 0.45) { HLH <- 1 } else HLH <- 0
+#     if(sum(c(Flat,LHL,LH,HL,HLH))<1) { OTH <- 1 } else OTH <- 0
+# 
+#     # Compute predictions for start, end, and int Bk with trained neural networks
+#     # B/k range that contains 90% of the data points if ct/MSY.pr >= 1
+#     bk.MSY <- c(0.256 , 0.721 ) # based on all ct/MSY.pr data for 400 stocks # data copied from Plot_ct_MSY_13.R output
+#     CL.1   <- c( 0.01 , 0.203 )
+#     CL.2   <- c( 0.2 , 0.431 )
+#     CL.3   <- c( 0.8 , -0.45 )
+#     CL.4   <- c( 1.02 , -0.247 )
+# 
+#     # estimate startbio
+#     # if ct/MSY.pr >= ct_MSY.lim use bk.MSY range
+#     if(mean.ct_MSY.start >= ct_MSY.lim) {
+#       startbio    <- bk.MSY
+#     } else { # else run neural network to determine whether B/k is above or below 0.5
+#         nninput.start  <- as.data.frame(cbind(Flat,LH,LHL,HL,HLH,OTH,min_max,max.ct.i,min.ct.i,yr.norm, #ct_MSY.1,
+#                                           mean.ct_MSY.start,slope.first.nrm,mean.ct_MSY.end,slope.last.nrm)) #gm.prior.r
+#         pr.nn.startbio <- compute(nn.startbio, nninput.start)
+#         pr.nn_indices.startbio <- max.col(pr.nn.startbio$net.result)
+#         ct_MSY.use     <- ifelse(ct_MSY.1 < mean.ct_MSY.start,ct_MSY.1,mean.ct_MSY.start)
+#         if(pr.nn_indices.startbio==1) { # if nn predicts B/k below 0.5
+#           startbio      <- c(CL.1[1]+CL.1[2]*mean.ct_MSY.start,CL.2[1]+CL.2[2]*mean.ct_MSY.start) } else {
+#             startbio      <- c(CL.3[1]+CL.3[2]*mean.ct_MSY.start,CL.4[1]+CL.4[2]*mean.ct_MSY.start) }
+#     } # end of neural network loop
+# 
+#     # estimate intbio
+#     if(ct_MSY.int >= ct_MSY.lim) {
+#       intbio    <- bk.MSY
+#     } else { # else run neural network to determine whether B/k is above or below 0.5
+#     nninput.int    <- as.data.frame(cbind(Flat,LH,LHL,HL,HLH,OTH, # shapes
+#                                           min_max,max.ct.i,min.ct.i,yr.norm, # general
+#                                           int.ct.i,ct_MSY.int,                   # int
+#                                           mean.ct_MSY.end,slope.last.nrm,        # end
+#                                           mean.ct_MSY.start,slope.first.nrm))     # start
+# 
+#     pr.nn.intbio   <- compute(nn.intbio, nninput.int)
+#     pr.nn_indices.intbio <- max.col(pr.nn.intbio$net.result)
+#     if(pr.nn_indices.intbio==1){ # if nn predicts B/k below 0.5
+#       intbio      <- c(CL.1[1]+CL.1[2]*ct_MSY.int,CL.2[1]+CL.2[2]*ct_MSY.int) } else {
+#           intbio    <- c(CL.3[1]+CL.3[2]*ct_MSY.int,CL.4[1]+CL.4[2]*ct_MSY.int)}
+#     } # end of nn loop
+# 
+#     # estimate endbio
+#       # if ct/MSY.pr >= ct_MSY.lim use bk.MSY range
+#       if(mean.ct_MSY.end >= ct_MSY.lim) {
+#         endbio    <- bk.MSY
+#       } else { # else run neural network to determine whether B/k is above or below 0.5
+#          nninput.end    <- as.data.frame(cbind(Flat,LH,LHL,HL,HLH,OTH,ct_MSY.int,min_max,max.ct.i,  # arbitrary best sequence
+#                                                int.ct.i,min.ct.i,yr.norm,
+#                                                mean.ct_MSY.start,slope.first.nrm,mean.ct_MSY.end,slope.last.nrm))
+#          pr.nn.endbio   <- compute(nn.endbio, nninput.end)
+#          pr.nn_indices.endbio <- max.col(pr.nn.endbio$net.result)
+#          ct_MSY.use    <- ifelse(ct_MSY.end < mean.ct_MSY.end,ct_MSY.end,mean.ct_MSY.end)
+#          if(pr.nn_indices.endbio==1){ # if nn predicts B/k below 0.5
+#           endbio      <- c(CL.1[1]+CL.1[2]*ct_MSY.use,CL.2[1]+CL.2[2]*ct_MSY.use) } else {
+#             endbio      <- c(CL.3[1]+CL.3[2]*ct_MSY.use,CL.4[1]+CL.4[2]*ct_MSY.use)}
+# 
+#   } # end of nn loop
+# 
+#     # -------------------------------------------------------
+#     # if abundance data are available, use to set B/k priors
+#     #--------------------------------------------------------
+#     # The following assumes that max smoothed cpue will not exceed carrying capacity and will
+#     # not be less than a quarter of carrying capacity
+# 
+#     if(btype != "None") {
+#       # get length, min, max, min/max ratio of smoothed bt data
+#       start.bt      <- yr[which(bt>0)[1]]
+#       end.bt        <- yr[max(which(bt>0))]
+#       yr.bt         <- seq(from=start.bt,to=end.bt,by=1) #range of years with bt data
+#       bt.no.na      <- approx(bt[yr>=start.bt & yr<=end.bt],n=length(yr.bt))$y
+#       bt.sm         <- ksmooth(x=yr.bt,y=bt.no.na,kernel="normal",n.points=length(yr.bt),bandwidth=bw)$y
+#       min.bt.sm     <- min(bt.sm,na.rm=T)
+#       max.bt.sm     <- max(bt.sm,na.rm=T)
+#       yr.min.bt.sm  <- yr.bt[which.min(bt.sm)]
+#       yr.max.bt.sm  <- yr.bt[bt.sm==max.bt.sm]
+# 
+#     # The prior B/k bounds derived from cpue are Bk.cpue.pr.low = 0.25 * cpue/max.cpue
+#     # and Bk.cpue.pr.hi = 1.0 * cpue/max.cpue
+#       if(bt4pr == T) { # if B/k priors shall be estimated from CPUE...
+#       # if cpue is available in first 3 years, use to set startbio
+#       if(is.na(stb.low)==T & is.na(stb.hi)==T & start.bt <= yr[3]) {
+#           startbio.bt <- c(0.25*bt.sm[1]/max.bt.sm,bt.sm[1]/max.bt.sm)
+#           # if first catch is low and cpue close to max, assume unexploited stock
+#           if(ct[1]/max.ct < 0.2 & bt.sm[1]/max.bt.sm > 0.8) {startbio.bt <- c(0.8,1)}
+# 
+#         # use startbio estimated from bt only if it is narrower or similar to startbio estimated by the neural network
+#         if((1.25*(startbio[2]-startbio[1])) >  (startbio.bt[2]-startbio.bt[1])) {
+#           startbio <- startbio.bt }
+# 
+#       } # end of startbio loop
+# 
+#       # use min cpue to set intbio (ignore years close to start or end)
+#       if(is.na(intb.low)==T & is.na(intb.hi)==T) {
+#         st.33     <- ifelse(start.bt<(start.yr+3),start.yr+3,start.bt) # first year eligible for intbio
+#         end.33    <- ifelse(end.bt>(end.yr-3),end.yr-3,end.bt) # last year eligible for intbio
+#         bt.33     <- bt.sm[yr.bt>=st.33 & yr.bt<=end.33] # CPUE values relevant for intbio
+#         yr.bt.33  <- seq(from=st.33,to=end.33,by=1) # range of years with relevant bt data
+#         min.bt.33 <- min(bt.33,na.rm=T) # mimimum of relevant bt
+#         int.yr.bt <- yr.bt.33[bt.33==min.bt.33] # year with min bt
+#         intbio.bt <- c(0.25*min.bt.33/max.bt.sm,min.bt.33/max.bt.sm) # intbio prior predicted for int.yr.bt
+# 
+#         # if mean catch/MSY before int.yr is high (> 0.8), use narrower range
+#         ct.MSY.prev  <- mean(ct[yr>=(int.yr-4) & yr<=int.yr])/MSY.pr
+#         if(ct.MSY.prev > 0.8) { intbio.bt <- c(1.2*intbio.bt[1],0.8*intbio.bt[2]) }
+#         # if cpue range is narrow, use lower intbio
+#         if(min.bt.sm/max.bt.sm>0.3) {intbio.bt <- c(0.8*intbio.bt[1],0.8*intbio.bt[2]) }
+# 
+#         # use intbio estimated from bt only if it is narrower or similar to intbio estimated by the neural network
+#         if((1.25*(intbio[2]-intbio[1])) >=  (intbio.bt[2]-intbio.bt[1])) {
+#           int.yr   <- int.yr.bt
+#           intbio   <- intbio.bt }
+# 
+#       } # end of intbio loop
+# 
+#       # if cpue is within last 3 years of time series, use to set endbio
+#       if(is.na(endb.low)==T & is.na(endb.hi)==T) {
+#         if(end.bt >= yr[nyr-2]) {
+#           endbio.bt  <- c(0.25*bt.sm[yr.bt==end.bt]/max.bt.sm,bt.sm[yr.bt==end.bt]/max.bt.sm)
+#           # if mean catch/MSY before end.yr is high (> 0.8), use narrower range,
+#           # because with high previous catch, biomass can neither be very low nor near k
+#           ct.MSY.prev  <- mean(ct[yr>=(end.yr-4) & yr<=end.yr])/MSY.pr
+#           if(ct.MSY.prev > 0.8) { endbio.bt <- c(1.2*endbio.bt[1],0.8*endbio.bt[2]) }
+#           # if endbio estimated by neural network is low and cpue is well below max, use endbio
+#           if(mean(endbio.bt)>mean(endbio) & mean(endbio)<0.3 & bt.sm[yr.bt==end.bt]/max.bt.sm < 0.7) {endbio.bt <- endbio}
+#           # if cpue range is narrow, use lower endbio
+#           if(min.bt.sm/max.bt.sm>0.3) {endbio.bt <- c(0.8*endbio.bt[1],0.8*endbio.bt[2]) }
+# 
+#         # use endbio estimated from bt only if it is narrower or similar to endbio estimated by the neural network
+#           if((1.25*(endbio[2]-endbio[1])) >  (endbio.bt[2]-endbio.bt[1])) {
+#             endbio   <- endbio.bt }
+#         }
+#       } # end of endbio loop
+#      } # end of b/k prior loop
+#     } # end of bt priors loop
+# 
+#   # if user defined B/k priors in the ID file, use those
+#     if(is.na(stb.low)==F & is.na(stb.hi)==F) {startbio <- c(stb.low,stb.hi)}
+#     if(is.na(intb.low)==F & is.na(intb.hi)==F) {
+#       int.yr   <- cinfo$int.yr[cinfo$Stock==stock]
+#       intbio   <- c(intb.low,intb.hi)}
+#     if(is.na(endb.low)==F & is.na(endb.hi)==F) {endbio   <- c(endb.low,endb.hi)}
+# 
+#   cat("startbio=",startbio,ifelse(is.na(stb.low)==T,"default","expert"),
+#       ", intbio=",int.yr,intbio,ifelse(is.na(intb.low)==T,"default","expert"),
+#       ", endbio=",endbio,ifelse(is.na(endb.low)==T,"default","expert"),"\n")
+# 
+#   #----------------------------------------------------------------
+#   # Multivariate normal sampling of r-k log space
+#   #----------------------------------------------------------------
+#   # turn numerical ranges into log-normal distributions
+# 
+#   mean.log.r=mean(log(prior.r))
+#   sd.log.r=(log(prior.r[2])-log(prior.r[1]))/4  # assume range covers 4 SD
+# 
+#   mean.log.k <- mean(log(prior.k))
+#   sd.log.k   <- (log(prior.k[2])-log(prior.k[1]))/4 # assume range covers 4 SD
+# 
+#   mvn.log.rk <- mvn(n=n,mean.log.r=mean.log.r,sd.log.r=sd.log.r,mean.log.k=mean.log.k,sd.log.k=sd.log.k)
+#   #><>MSY rk based on empirical mvn
+#   ri.emp     <- exp(mvn.log.rk[,1])
+#   ki1.emp    <- exp(mvn.log.rk[,2])
+# 
+#   #-----------------------------------------------------------------
+#   #Plot data and progress -----
+#   #-----------------------------------------------------------------
+#   # check for operating system, open separate window for graphs if Windows
+#   if(grepl("win",tolower(Sys.info()['sysname']))) {windows(14,9)}
+#   par(mfrow=c(2,3),mar=c(5.1,4.5,4.1,2.1))
+#   # (a): plot catch ----
+#   plot(x=yr, y=ct.raw,
+#        ylim=c(0,max(ifelse(substr(id_file,1,3)=="Sim",
+#                            1.1*true.MSY,0),1.2*max(ct.raw))),
+#        type ="l", bty="l", main=paste("A:",gsub(":","",gsub("/","-",stock))), xlab="", ylab="Catch (1000 tonnes/year)", lwd=2, cex.main = 1.5, cex.lab = 1.55, cex.axis = 1.5)
+#   lines(x=yr,y=ct,col="blue", lwd=1)
+#   points(x=yr[max.yr.i], y=max.ct, col="red", lwd=2)
+#   points(x=yr[min.yr.i], y=min.ct, col="red", lwd=2)
+#   lines(x=yr,y=rep(MSY.pr,length(yr)),lty="dotted",col="purple")
+#   if(substr(id_file,1,3)=="Sim") lines(x=yr,y=rep(true.MSY,length(yr)),lty="dashed",col="green")
+# 
+#   # (b): plot r-k graph
+#   plot(x=ri1, y=ki1, xlim = c(0.95*quantile(ri1,0.001),1.2*quantile(ri1,0.999)),
+#        ylim = c(0.95*quantile(ki1,0.001),1.2*quantile(ki1,0.999)),
+#        log="xy", xlab="r", ylab="k (1000 tonnes)", main="B: Finding viable r-k", pch=".", cex=2, bty="l",
+#        col=grey(0.7,0.4), cex.main = 1.5, cex.lab = 1.55, cex.axis = 1.5)
+#   lines(x=c(prior.r[1],prior.r[2],prior.r[2],prior.r[1],prior.r[1]), # plot original prior range
+#         y=c(prior.k[1],prior.k[1],prior.k[2],prior.k[2],prior.k[1]),
+#         lty="dotted")
+# 
+#   #---------------------------------------------------------------------
+#   # Prepare MCMC analyses
+#   #---------------------------------------------------------------------
+#   # set inits for r-k in lower right corner of log r-k space to avoid intermediate maxima
+#   init.r      <- prior.r[1]+0.8*(prior.r[2]-prior.r[1])
+#   init.k      <- prior.k[1]+0.1*(prior.k[2]-prior.k[1])
+# 
+#   # vector with no penalty (=0) if predicted biomass is within viable range, else a penalty of 10 is set
+#   pen.bk = pen.F = rep(0,length(ct))
+# 
+#   # Add biomass priors
+#   b.yrs = c(1,length(start.yr:int.yr),length(start.yr:end.yr))
+#   b.prior = rbind(matrix(c(startbio[1],startbio[2],intbio[1],intbio[2],endbio[1],endbio[2]),2,3),rep(0,3)) # last row includes the 0 penalty
+# 
+#   #----------------------------------------------------------------
+#   # First run of BSM with only catch data = CMSY++
+#   #----------------------------------------------------------------
+#     # changes by RF to account for asymmetric distributions
+#     bt.start  <- mean(c(prior.k[1]*startbio[1],prior.k[2]*startbio[2])) # derive proxy for first bt value
+#     bt.cmsy   <- c(bt.start,rep(NA,length(ct)-1)) # create proxy abundance with one start value and rest = NA
+#     bt.int    <- mean(c(prior.k[1]*intbio[1],prior.k[2]*intbio[2]))
+#     bt.last  <- mean(c(prior.k[1]*endbio[1],prior.k[2]*endbio[2]))
+# 
+#     mean.cmsy.ct   <- mean(c(ct[1],ct[yr==int.yr],ct[nyr]),na.rm=T) # get mean catch of years with prior bt
+#     mean.cmsy.cpue <- mean(c(bt.start,bt.int,bt.last),na.rm=T) # get mean of prior bt
+# 
+#     q.prior.cmsy    <- c(0.99,1.01) # since no abundance data are available in this run,
+#     init.q.cmsy     <- 1            # q could be omitted and is set here to (practically) 1
+# 
+#   cat("Running MCMC analysis with only catch data....\n")
+# 
+#   # call Schaefer model function
+#   jags_cmsy <- bsm(ct=ct,btj=bt.cmsy,nyr=nyr,prior.r=prior.r,prior.k=prior.k,startbio=startbio,q.priorj=q.prior.cmsy,
+#                       init.q=init.q.cmsy,init.r=init.r,init.k=init.k,pen.bk=pen.bk,pen.F=pen.F,b.yrs=b.yrs,
+#                       b.prior=b.prior,CV.C=CV.C,CV.cpue=CV.cpue,nbk=nbk,rk.cor.beta=rk.cor.beta,cmsyjags=TRUE)
+# 
+#   #-----------------------------------------------
+#   # Get CMSY++ results
+#   #-----------------------------------------------
+#   rs                <- as.numeric(mcmc(jags_cmsy$BUGSoutput$sims.list$r))   # unique.rk[,1]
+#   ks                <- as.numeric(mcmc(jags_cmsy$BUGSoutput$sims.list$k))  # unique.rk[,2]
+#   ellipse.cmsy       <- traceEllipse(rs,ks,prior.r,prior.k) # GP
+#   r.cmsy             <- ellipse.cmsy[1] # GP
+#   k.cmsy             <- ellipse.cmsy[2] # GP
+#   # restrict CI quantiles to above 25th percentile of rs
+#   rs.025             <- as.numeric(quantile(rs,0.025))
+#   r.quant.cmsy       <- as.numeric(quantile(rs[rs>rs.025],c(0.5,0.025,0.975))) # median, 95% CIs in range around
+#   k.quant.cmsy       <- as.numeric(quantile(ks[rs>rs.025],c(0.5,0.025,0.975)))
+#   lcl.r.cmsy         <- r.quant.cmsy[2]
+#   ucl.r.cmsy         <- r.quant.cmsy[3]
+#   lcl.k.cmsy         <- k.quant.cmsy[2]
+#   ucl.k.cmsy         <- k.quant.cmsy[3]
+#   MSY.quant.cmsy     <- quantile(rs[rs>rs.025]*ks[rs>rs.025]/4,c(0.5,0.025,0.975))
+#   MSY.cmsy           <- r.cmsy*k.cmsy/4
+#   lcl.MSY.cmsy       <- MSY.quant.cmsy[2]
+#   ucl.MSY.cmsy       <- MSY.quant.cmsy[3]
+#   qs                 <- as.numeric(mcmc(jags_cmsy$BUGSoutput$sims.list$q))
+#   q.quant.cmsy       <- quantile(qs,c(0.5,0.025,0.975))
+#   q.cmsy             <- q.quant.cmsy[1]
+#   lcl.q.cmsy         <- q.quant.cmsy[2]
+#   ucl.q.cmsy         <- q.quant.cmsy[3]
+# 
+#   Fmsy.quant.cmsy    <- as.numeric(quantile(rs[rs>rs.025]/2,c(0.5,0.025,0.975)))
+#   Fmsy.cmsy          <- r.cmsy/2 # HW checked
+#   lcl.Fmsy.cmsy      <- Fmsy.quant.cmsy[2] #><>HW to be added to report output
+#   ucl.Fmsy.cmsy      <- Fmsy.quant.cmsy[3] #><>HW to be added to report output
+#   Bmsy.quant.cmsy    <- as.numeric(quantile(ks[rs>rs.025]/2,c(0.5,0.025,0.975)))
+#   Bmsy.cmsy          <- k.cmsy/2 # HW checked
+#   lcl.Bmsy.cmsy      <- Bmsy.quant.cmsy[2] #><>HW to be added to report output
+#   ucl.Bmsy.cmsy      <- Bmsy.quant.cmsy[3] #><>HW to be added to report output
+#   # HW posterior predictives can stay unchanged
+#   ppd.r              <- exp(as.numeric(mcmc(jags_cmsy$BUGSoutput$sims.list$ppd.logrk[,1])))
+#   ppd.k              <- exp(as.numeric(mcmc(jags_cmsy$BUGSoutput$sims.list$ppd.logrk[,2])))
+# 
+#   #><>HW get FFmsy directly from JAGS
+#   all.FFmsy.cmsy  = jags_cmsy$BUGSoutput$sims.list$FFmsy
+#   FFmsy.quant.cmsy = apply(all.FFmsy.cmsy,2,quantile,c(0.5,0.025,0.975),na.rm=T)
+#   FFmsy.cmsy = FFmsy.quant.cmsy[1,]
+#   lcl.FFmsy.cmsy = FFmsy.quant.cmsy[2,]
+#   ucl.FFmsy.cmsy = FFmsy.quant.cmsy[3,]
+#   #><>HW get BBmsy directly from JAGS
+#   all.BBmsy.cmsy  = jags_cmsy$BUGSoutput$sims.list$BBmsy
+#   BBmsy.quant.cmsy = apply(all.BBmsy.cmsy,2,quantile,c(0.5,0.025,0.975),na.rm=T)
+#   BBmsy.cmsy = BBmsy.quant.cmsy[1,]
+#   lcl.BBmsy.cmsy = BBmsy.quant.cmsy[2,]
+#   ucl.BBmsy.cmsy = BBmsy.quant.cmsy[3,]
+#   # get relative biomass P=B/k as predicted by BSM, including predictions for years with NA abundance
+#   all.bk.cmsy  = jags_cmsy$BUGSoutput$sims.list$P
+#   bk.quant.cmsy = apply(all.bk.cmsy,2,quantile,c(0.5,0.025,0.975),na.rm=T)
+#   bk.cmsy = bk.quant.cmsy[1,]
+#   lcl.bk.cmsy = bk.quant.cmsy[2,]
+#   ucl.bk.cmsy = bk.quant.cmsy[3,]
+#   #><> NEW get biomass from JAGS posterior
+#   all.B.cmsy  = jags_cmsy$BUGSoutput$sims.list$B
+#   B.quant.cmsy = apply(all.B.cmsy,2,quantile,c(0.5,0.025,0.975),na.rm=T)
+#   B.cmsy = B.quant.cmsy[1,]
+#   lcl.B.cmsy = B.quant.cmsy[2,]
+#   ucl.B.cmsy = B.quant.cmsy[3,]
+#   #><> NEW get F from JAGS posterior
+#   all.Ft.cmsy  = jags_cmsy$BUGSoutput$sims.list$F
+#   Ft.quant.cmsy = apply(all.Ft.cmsy,2,quantile,c(0.5,0.025,0.975),na.rm=T)
+#   Ft.cmsy = Ft.quant.cmsy[1,]
+#   lcl.Ft.cmsy = Ft.quant.cmsy[2,]
+#   ucl.Ft.cmsy = Ft.quant.cmsy[3,]
+# 
+#   # get catch estimates given catch CV
+#   all.ct.cmsy  = jags_cmsy$BUGSoutput$sims.list$ct.jags
+#   ct.quants.cmsy = apply(all.ct.cmsy,2,quantile,c(0.5,0.025,0.975),na.rm=T)
+#   ct.cmsy          <- ct.quants.cmsy[1,]
+#   lcl.ct.cmsy      <- ct.quants.cmsy[2,]
+#   ucl.ct.cmsy      <- ct.quants.cmsy[3,]
+# 
+#   
+#   
+#   #-------------------------------------------------------------------
+#   # Plot results
+#   #-------------------------------------------------------------------
+#   # (b) continued
+#   # plot viable r-k pairs from catch-only BSM run
+#   points(x=rs,y=ks,pch=".",cex=1,col="gray55")
+# 
+#   # show CMSY++ estimate in prior space of graph B
+#   points(x=r.cmsy, y=k.cmsy, pch=19, col="blue")
+#   lines(x=c(lcl.r.cmsy, ucl.r.cmsy),y=c(k.cmsy,k.cmsy), col="blue")
+#   lines(x=c(r.cmsy,r.cmsy),y=c(lcl.k.cmsy, ucl.k.cmsy), col="blue")
+# 
+#   lines(x=c(prior.r[1],prior.r[2],prior.r[2],prior.r[1],prior.r[1]), # re-plot original prior range
+#         y=c(prior.k[1],prior.k[1],prior.k[2],prior.k[2],prior.k[1]),lty="dotted")
+# 
+#   # ------------------------------------------------------------------
+#   # Second run with Bayesian analysis of catch & biomass (or CPUE) with Schaefer model ----
+#   # ------------------------------------------------------------------
+#     FullSchaefer <- F
+#  #   bt           <- bt.raw
+#     if(btype != "None" & length(bt[is.na(bt)==F])>=nab) {
+#     FullSchaefer <- T
+#     cat("Running MCMC analysis with catch and CPUE.... \n")
+# 
+#     if(btype=="biomass") {
+#         q.prior <- q.biomass.pr
+#         init.q  <- mean(q.prior)
+#     } else { # if btype is CPUE
+#       # get mean of 3 highest bt values
+#       bt.sort <- sort(bt)
+#       mean.max.bt <- mean(bt.sort[(length(bt.sort)-2):length(bt.sort)],na.rm = T)
+#       # Estimate q.prior[2] from max cpue = q * k, q.prior[1] from max cpue = q * 0.25 * k
+#       q.1           <- mean.max.bt/prior.k[2]
+#       q.2           <- mean.max.bt/(0.25*prior.k[1])
+#       q.prior       <- c(q.1,q.2)
+#       q.init        <- mean(q.prior) }
+# 
+#     # call Schaefer model function
+#     jags_bsm <- bsm(ct=ct,btj=bt,nyr=nyr,prior.r=prior.r,prior.k=prior.k,startbio=startbio,q.priorj=q.prior,
+#                         init.q=init.q,init.r=init.r,init.k=init.k,pen.bk=pen.bk,pen.F=pen.F,b.yrs=b.yrs,
+#                         b.prior=b.prior,CV.C=CV.C,CV.cpue=CV.cpue,nbk=nbk,rk.cor.beta=rk.cor.beta,cmsyjags=FALSE)
+# 
+#     # --------------------------------------------------------------
+#     # Results from BSM Schaefer - ><>HW now consistent with CMSY++
+#     # --------------------------------------------------------------
+#     rs.bsm            <- as.numeric(mcmc(jags_bsm$BUGSoutput$sims.list$r))   # unique.rk[,1]
+#     ks.bsm            <- as.numeric(mcmc(jags_bsm$BUGSoutput$sims.list$k))  # unique.rk[,2]
+#     #><> HW: Go directly with posterior median and CIs (non-parametric)
+#     r.quant.bsm       <- as.numeric(quantile(rs.bsm,c(0.5,0.025,0.975))) #median, 95% CIs
+#     r.bsm             <- r.quant.bsm[1]
+#     lcl.r.bsm         <- r.quant.bsm[2]
+#     ucl.r.bsm         <- r.quant.bsm[3]
+#     k.quant.bsm          <- as.numeric(quantile(ks.bsm,c(0.5,0.025,0.975)))
+#     k.bsm             <- k.quant.bsm[1]
+#     lcl.k.bsm         <- k.quant.bsm[2]
+#     ucl.k.bsm         <- k.quant.bsm[3]
+#     MSY.quant.bsm     <- quantile(rs.bsm*ks.bsm/4,c(0.5,0.025,0.975))
+#     MSY.bsm           <- MSY.quant.bsm[1]
+#     lcl.MSY.bsm       <- MSY.quant.bsm[2]
+#     ucl.MSY.bsm       <- MSY.quant.bsm[3]
+#     qs.bsm            <- as.numeric(mcmc(jags_bsm$BUGSoutput$sims.list$q))
+#     q.quant.bsm       <- as.numeric(quantile(qs.bsm,c(0.5,0.025,0.975)))
+#     q.bsm             <- q.quant.bsm[1]
+#     lcl.q.bsm         <- q.quant.bsm[2]
+#     ucl.q.bsm         <- q.quant.bsm[3]
+# 
+#     Fmsy.quant.bsm      <- as.numeric(quantile(rs.bsm/2,c(0.5,0.025,0.975)))
+#     Fmsy.bsm           <- Fmsy.quant.bsm[1]
+#     lcl.Fmsy.bsm        <- Fmsy.quant.bsm[2] #><>HW to be added to report output
+#     ucl.Fmsy.bsm        <- Fmsy.quant.bsm[3] #><>HW to be added to report output
+#     Bmsy.quant.bsm      <- as.numeric(quantile(ks.bsm/2,c(0.5,0.025,0.975)))
+#     Bmsy.bsm            <- Bmsy.quant.bsm[1]
+#     lcl.Bmsy.bsm        <- Bmsy.quant.bsm[2] #><>HW to be added to report output
+#     ucl.Bmsy.bsm        <- Bmsy.quant.bsm[3] #><>HW to be added to report output
+# 
+#     #><>HW get FFmsy directly from JAGS
+#     all.FFmsy.bsm  = jags_bsm$BUGSoutput$sims.list$FFmsy
+#     FFmsy.quant.bsm = apply(all.FFmsy.bsm,2,quantile,c(0.5,0.025,0.975),na.rm=T)
+#     FFmsy.bsm = FFmsy.quant.bsm[1,]
+#     lcl.FFmsy.bsm = FFmsy.quant.bsm[2,]
+#     ucl.FFmsy.bsm = FFmsy.quant.bsm[3,]
+#     #><>HW get BBmsy directly from JAGS
+#     all.BBmsy.bsm  = jags_bsm$BUGSoutput$sims.list$BBmsy
+#     BBmsy.quant.bsm = apply(all.BBmsy.bsm,2,quantile,c(0.5,0.025,0.975),na.rm=T)
+#     BBmsy.bsm = BBmsy.quant.bsm[1,]
+#     lcl.BBmsy.bsm = BBmsy.quant.bsm[2,]
+#     ucl.BBmsy.bsm = BBmsy.quant.bsm[3,]
+#     # get relative biomass P=B/k as predicted by BSM, including predictions for years with NA abundance
+#     all.bk.bsm  = jags_bsm$BUGSoutput$sims.list$P
+#     bk.quant.bsm = apply(all.bk.bsm,2,quantile,c(0.5,0.025,0.975),na.rm=T)
+#     bk.bsm = bk.quant.bsm[1,]
+#     lcl.bk.bsm = bk.quant.bsm[2,]
+#     ucl.bk.bsm = bk.quant.bsm[3,]
+#     #><> NEW get biomass from JAGS posterior
+#     all.B.bsm  = jags_bsm$BUGSoutput$sims.list$B
+#     B.quant.bsm = apply(all.B.bsm,2,quantile,c(0.5,0.025,0.975),na.rm=T)
+#     B.bsm = B.quant.bsm[1,]
+#     lcl.B.bsm = B.quant.bsm[2,]
+#     ucl.B.bsm = B.quant.bsm[3,]
+#     #><> NEW get F from JAGS posterior
+#     all.Ft.bsm  = jags_bsm$BUGSoutput$sims.list$F
+#     Ft.quant.bsm = apply(all.Ft.bsm,2,quantile,c(0.5,0.025,0.975),na.rm=T)
+#     Ft.bsm = Ft.quant.bsm[1,]
+#     lcl.Ft.bsm = Ft.quant.bsm[2,]
+#     ucl.Ft.bsm = Ft.quant.bsm[3,]
+# 
+#     # get catch estimates given catch CV
+#     all.ct.bsm  = jags_bsm$BUGSoutput$sims.list$ct.jags
+#     ct.quants.bsm = apply(all.ct.bsm,2,quantile,c(0.5,0.025,0.975),na.rm=T)
+#     ct.bsm          <- ct.quants.bsm[1,]
+#     lcl.ct.bsm      <- ct.quants.bsm[2,]
+#     ucl.ct.bsm      <- ct.quants.bsm[3,]
+# 
+#     #-------------------------------------------
+#     # BSM fits
+#     #-------------------------------------------
+#     #><> HW PLOT E (observations)
+#     F.bt.jags       <- q.bsm*ct.raw/bt # F from raw data
+#     F.bt_Fmsy.jags  <- vector() # initialize vector
+#     for(z in 1: length(F.bt.jags)) {
+#       F.bt_Fmsy.jags[z] <- ifelse(is.na(bt[z])==T,NA,F.bt.jags[z]/
+#                                     ifelse(((bt[z]/q.bsm)/k.bsm)<0.25,Fmsy.bsm*4*(bt[z]/q.bsm)/k.bsm,Fmsy.bsm))}
+# 
+#     #><> get cpue fits from BSM
+#     cpue.bsm        <- exp(jags_bsm$BUGSoutput$sims.list$cpuem)
+#     pe.logbt.bsm   <- (jags_bsm$BUGSoutput$sims.list$proc.logB)
+#     # get cpue predicted
+#     pred.cpue            <- apply(cpue.bsm,2,quantile,c(0.5,0.025,0.975))
+#     cpue.bsm          <- pred.cpue[1,]
+#     lcl.cpue.bsm      <- pred.cpue[2,]
+#     ucl.cpue.bsm      <- pred.cpue[3,]
+#     # get process error on log(biomass)   pred.cpue            <- apply(cpue.jags,2,quantile,c(0.5,0.025,0.975))
+#     pred.pe         <- apply(pe.logbt.bsm,2,quantile,c(0.5,0.025,0.975))
+#     pe.bsm         <- pred.pe[1,]
+#     lcl.pe.bsm     <- pred.pe[2,]
+#     ucl.pe.bsm     <- pred.pe[3,]
+# 
+# 
+#     # get variance and correlation between log(r) and log(k)
+#     log.r.var    <- var(x=log(rs.bsm))
+#     log.k.var    <- var(x=log(ks.bsm))
+#     log.kr.cor   <- cor(x=log(rs.bsm),y=log(ks.bsm))
+#     log.kr.cov   <- cov(x=log(rs.bsm),y=log(ks.bsm))
+# 
+#   } # end of MCMC BSM Schaefer loop
+# 
+#   # --------------------------------------------
+#   # Get results for management ----
+#   # --------------------------------------------
+#   if(FullSchaefer==F | force.cmsy==T) { # if only CMSY is available or shall be used
+#     MSY   <-MSY.cmsy; lcl.MSY<-lcl.MSY.cmsy; ucl.MSY<-ucl.MSY.cmsy
+#     Bmsy  <-Bmsy.cmsy; lcl.Bmsy<-lcl.Bmsy.cmsy; ucl.Bmsy<-ucl.Bmsy.cmsy
+#     Fmsy  <-Fmsy.cmsy; lcl.Fmsy<-lcl.Fmsy.cmsy; ucl.Fmsy<-ucl.Fmsy.cmsy
+#     F.Fmsy<-FFmsy.cmsy;lcl.F.Fmsy<-lcl.FFmsy.cmsy; ucl.F.Fmsy<-ucl.FFmsy.cmsy
+#     B.Bmsy<-BBmsy.cmsy[1:nyr];lcl.B.Bmsy<-lcl.BBmsy.cmsy[1:nyr][1:nyr];ucl.B.Bmsy<-ucl.BBmsy.cmsy[1:nyr]
+#     B <- B.cmsy[1:nyr];lcl.B<-lcl.B.cmsy[1:nyr][1:nyr];ucl.B<-ucl.B.cmsy[1:nyr]
+#     Ft <- Ft.cmsy[1:nyr];lcl.Ft<-lcl.Ft.cmsy[1:nyr][1:nyr];ucl.Ft<-ucl.Ft.cmsy[1:nyr]
+#     bk <- bk.cmsy[1:nyr];lcl.bk<-lcl.bk.cmsy[1:nyr][1:nyr];ucl.bk<-ucl.bk.cmsy[1:nyr]
+# 
+#     ct.jags <- ct.cmsy; lcl.ct.jags = lcl.ct.cmsy; ucl.ct.jags=ucl.ct.cmsy #catch estimate given catch error
+# 
+#   } else { # if FullSchaefer is TRUE
+#     MSY   <-MSY.bsm; lcl.MSY<-lcl.MSY.bsm; ucl.MSY<-ucl.MSY.bsm
+#     Bmsy  <-Bmsy.bsm; lcl.Bmsy<-lcl.Bmsy.bsm; ucl.Bmsy<-ucl.Bmsy.bsm
+#     Fmsy  <-Fmsy.bsm; lcl.Fmsy<-lcl.Fmsy.bsm; ucl.Fmsy<-ucl.Fmsy.bsm
+#     F.Fmsy<-FFmsy.bsm;lcl.F.Fmsy<-lcl.FFmsy.bsm; ucl.F.Fmsy<-ucl.FFmsy.bsm
+#     B.Bmsy<-BBmsy.bsm[1:nyr];lcl.B.Bmsy<-lcl.BBmsy.bsm[1:nyr][1:nyr];ucl.B.Bmsy<-ucl.BBmsy.bsm[1:nyr]
+#     B <- B.bsm[1:nyr];lcl.B<-lcl.B.bsm[1:nyr][1:nyr];ucl.B<-ucl.B.bsm[1:nyr]
+#     Ft <- Ft.bsm[1:nyr];lcl.Ft<-lcl.Ft.bsm[1:nyr][1:nyr];ucl.Ft<-ucl.Ft.bsm[1:nyr]
+#     bk <- bk.bsm[1:nyr];lcl.bk<-lcl.bk.bsm[1:nyr][1:nyr];ucl.bk<-ucl.bk.bsm[1:nyr]
+#     ct.jags <- ct.bsm; lcl.ct.jags = lcl.ct.bsm; ucl.ct.jags=ucl.ct.bsm #catch estimate given catch error
+# 
+#   }
+# 
+#   #><> New section simplified for CMSY++ and BSM
+#     Fmsy.adj     <- ifelse(B.Bmsy>0.5,Fmsy,Fmsy*2*B.Bmsy)
+#     lcl.Fmsy.adj <- ifelse(B.Bmsy>0.5,lcl.Fmsy,lcl.Fmsy*2*B.Bmsy)
+#     ucl.Fmsy.adj <- ifelse(B.Bmsy>0.5,ucl.Fmsy,ucl.Fmsy*2*B.Bmsy)
+# 
+#     if(is.na(sel.yr)==F){
+#       B.Bmsy.sel<-B.Bmsy[yr==sel.yr]
+#       B.sel<-B.Bmsy.sel*Bmsy
+#       F.sel<-ct.raw[yr==sel.yr]/B.sel
+#       F.Fmsy.sel<-F.sel/Fmsy.adj[yr==sel.yr]
+#     }
+# 
+#   # ------------------------------------------
+#   # print input and results to screen ----
+#   #-------------------------------------------
+#   cat("---------------------------------------\n")
+#   cat("Species:", cinfo$ScientificName[cinfo$Stock==stock], ", stock:",stock,", ",ename,"\n")
+#   cat(cinfo$Name[cinfo$Stock==stock], "\n")
+#   cat("Region:",cinfo$Region[cinfo$Stock==stock],",",cinfo$Subregion[cinfo$Stock==stock],"\n")
+#   cat("Catch data used from years", min(yr),"-", max(yr),", abundance =", btype, "\n")
+#   cat("Prior initial relative biomass =", startbio[1], "-", startbio[2],ifelse(is.na(stb.low)==T,"default","expert"), "\n")
+#   cat("Prior intermediate rel. biomass=", intbio[1], "-", intbio[2], "in year", int.yr,ifelse(is.na(intb.low)==T,"default","expert"), "\n")
+#   cat("Prior final relative biomass   =", endbio[1], "-", endbio[2],ifelse(is.na(endb.low)==T,"default","expert"), "\n")
+#   cat("Prior range for r =", format(prior.r[1],digits=2), "-", format(prior.r[2],digits=2),ifelse(is.na(r.low)==T,"default","expert"),
+#       ", prior range for k =", prior.k[1], "-", prior.k[2],", MSY prior =",MSY.pr,"\n")
+#   # if Schaefer and CPUE, print prior range of q
+#   if(FullSchaefer==T) {
+#     cat("B/k prior used for first year in BSM",ifelse(nbk>1,"and intermediate year",""),ifelse(nbk==3,"and last year",""),"\n")
+#     cat("Prior range of q =",q.prior[1],"-",q.prior[2],", assumed effort creep",e.creep,"%\n") }
+#   if(substr(id_file,1,3)=="Sim") { # if data are simulated, print true values
+#     cat("True values: r =",true.r,", k = 1000, MSY =", true.MSY,", last B/k =", true.Bk,
+#         ", last F/Fmsy =",true.F_Fmsy,", q = 0.01\n") }
+# 
+#   # results of CMSY analysis
+#   cat("\nResults of CMSY analysis \n")
+#   cat("-------------------------\n")
+#   cat("r   =", r.cmsy,", 95% CL =", lcl.r.cmsy, "-", ucl.r.cmsy,", k =", k.cmsy,", 95% CL =", lcl.k.cmsy, "-", ucl.k.cmsy,"\n")
+#   cat("MSY =", MSY.cmsy,", 95% CL =", lcl.MSY.cmsy, "-", ucl.MSY.cmsy,"\n")
+#   cat("Relative biomass in last year =", bk.cmsy[nyr], "k, 2.5th perc =", lcl.bk.cmsy[nyr],
+#       ", 97.5th perc =", ucl.bk.cmsy[nyr],"\n")
+#   cat("Exploitation F/(r/2) in last year =", FFmsy.cmsy[nyr],", 2.5th perc =",lcl.FFmsy.cmsy[nyr],
+#       ", 97.5th perc =",ucl.FFmsy.cmsy[nyr],"\n\n")
+# 
+# 
+#   # print results from full Schaefer if available
+#   if(FullSchaefer==T) {
+#     cat("Results from Bayesian Schaefer model (BSM) using catch &",btype,"\n")
+#     cat("------------------------------------------------------------\n")
+#     cat("q   =", q.bsm,", lcl =", lcl.q.bsm, ", ucl =", ucl.q.bsm,"(derived from catch and CPUE) \n")
+#     cat("r   =", r.bsm,", 95% CL =", lcl.r.bsm, "-", ucl.r.bsm,", k =", k.bsm,", 95% CL =", lcl.k.bsm, "-", ucl.k.bsm,", r-k log correlation =", log.kr.cor,"\n")
+#     cat("MSY =", MSY.bsm,", 95% CL =", lcl.MSY.bsm, "-", ucl.MSY.bsm,"\n")
+#     cat("Relative biomass in last year =", bk.bsm[nyr], "k, 2.5th perc =",lcl.bk.bsm[nyr],
+#         ", 97.5th perc =", ucl.bk.bsm[nyr],"\n")
+#     cat("Exploitation F/(r/2) in last year =", FFmsy.bsm[nyr],", 2.5th perc =",lcl.FFmsy.bsm[nyr],
+#         ", 97.5th perc =",ucl.FFmsy.bsm[nyr],"\n\n")
+#   }
+# 
+#   # print results to be used in management
+#   cat("Results for Management (based on",ifelse(FullSchaefer==F | force.cmsy==T,"CMSY","BSM"),"analysis) \n")
+#   cat("-------------------------------------------------------------\n")
+#   if(force.cmsy==T) cat("Mangement results based on CMSY because abundance data seem unrealistic\n")
+#   cat("Fmsy =",Fmsy,", 95% CL =",lcl.Fmsy,"-",ucl.Fmsy,"(if B > 1/2 Bmsy then Fmsy = 0.5 r)\n")
+#   cat("Fmsy =",Fmsy.adj[nyr],", 95% CL =",lcl.Fmsy.adj[nyr],"-",ucl.Fmsy.adj[nyr],"(r and Fmsy are linearly reduced if B < 1/2 Bmsy)\n")
+#   cat("MSY  =",MSY,", 95% CL =",lcl.MSY,"-",ucl.MSY,"\n")
+#   cat("Bmsy =",Bmsy,", 95% CL =",lcl.Bmsy,"-",ucl.Bmsy,"\n")
+#   cat("Biomass in last year =",B[nyr],", 2.5th perc =", lcl.B[nyr], ", 97.5 perc =",ucl.B[nyr],"\n")
+#   cat("B/Bmsy in last year  =",B.Bmsy[nyr],", 2.5th perc =", lcl.B.Bmsy[nyr], ", 97.5 perc =",ucl.B.Bmsy[nyr],"\n")
+#   cat("Fishing mortality in last year =",Ft[nyr],", 2.5th perc =", lcl.Ft[nyr], ", 97.5 perc =",ucl.Ft[nyr],"\n")
+#   cat("Exploitation F/Fmsy  =",F.Fmsy[nyr],", 2.5th perc =", lcl.F.Fmsy[nyr], ", 97.5 perc =",ucl.F.Fmsy[nyr],"\n")
+# 
+#   # show stock status and exploitation for optional selected year
+#   if(is.na(sel.yr)==F) {
+#     cat("\nStock status and exploitation in",sel.yr,"\n")
+#     cat("Biomass =",B.sel, ", B/Bmsy =",B.Bmsy.sel,", F =",F.sel,", F/Fmsy =",F.Fmsy.sel,"\n") }
+# 
+#   cat("Comment:", comment,"\n")
+#   cat("----------------------------------------------------------\n")
+# 
+# 
+# }}
+#   })# end of stocks loop
+
+```
+
+
+
 
 JABBA {data-icon="fa-home"}
 ================================
