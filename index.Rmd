@@ -5,7 +5,7 @@ output:
     theme: lumen
     # temas: default, cerulean, journal, flatly, darkly, readable, spacelab, 
       # united, cosmo, lumen, paper, sandstone, simplex, yeti
-    orientation: rows
+    orientation: columns
     vertical_layout: fill
     social: ["twitter", "facebook", "menu"]
     name: 'IPMA'
@@ -33,8 +33,8 @@ library(dplyr)
 library(trend)
 
 # usado para box-jenkins
-# library(forecast)
-# library(astsa)
+library(forecast)
+library(astsa)
 
 # CMSY
 library(R2jags)  # Interface with JAGS
@@ -54,10 +54,185 @@ library(spict)
 ```
 
 ```{r load_data}
+load('./app_data/box_jenkins.Rdata')
 load('./app_data/data.Rdata')
 
 # Devemos acrescentar 'runtime:shiny' para correr imediatamente a app; para fazer knit e produzir os html necessarios para o github pages, basta tirar essa linha. Quando se reinstala ou actualiza algum package, reiniciar Rstudio antes de fazer publish se não ocorre um bug com as contas.
 ```
+
+SARIMA {data-icon="fa-home"}
+================================
+
+Column {.sidebar}
+-----------------------------------------------------------------------
+
+```{r}
+selectInput('Region_2',
+            label = 'Region',
+            choices = c('Western Coast', 'Southern Coast'),
+            selected = 'Southern Coast')
+selectInput('Frequency_2',
+            label = 'Time Frequency',
+            choices = c('Weeks','Months', 'Quarters', 'Years','Fishing Season'),
+            selected = 'Months')
+# numericInput('S',
+#             label = 'Frequency',
+#             value = 12)
+numericInput('p',
+            label = 'Autoregressive order (p)',
+            value = 2)
+numericInput('q',
+            label = 'Moving Average order (q)',
+            value = 2)
+numericInput('d',
+            label = 'Differentiation (d)',
+            value = 0)
+numericInput('P',
+            label = 'Seasonal Autoregressive order (P)',
+            value = 0)
+numericInput('Q',
+            label = 'Seasonal Moving Average order (Q)',
+            value = 2)
+numericInput('D',
+            label = 'Seasonal Differentiation (D)',
+            value = 0)
+```
+
+Row
+-----------------------------------------------------------------------
+
+### Controls_1
+
+```{r}
+numericInput('maxlag',
+             label = 'Max Lag',
+             value = 48)
+```
+
+### Controls_2
+
+```{r}
+numericInput('diff',
+             label = 'Differentiation',
+             value = 0)
+```
+
+### Controls_3
+
+```{r}
+numericInput('cutoff',
+             label = 'Test split',
+             value = 12)
+```
+
+
+```{r}
+dados_2 = reactive({
+   get(if(input$Region_2 == 'Southern Coast' & input$Frequency_2 == 'Weeks'){
+     'ts_w_S'}
+     else if(input$Region_2 == 'Southern Coast' & input$Frequency_2 == 'Months'){
+     'ts_m_S'}
+      else if(input$Region_2 == 'Southern Coast' & input$Frequency_2 == 'Quarters'){
+     'ts_q_S'}
+      else if(input$Region_2 == 'Southern Coast' & input$Frequency_2 == 'Years'){
+     'ts_y_S'}
+      else if(input$Region_2 == 'Southern Coast' & input$Frequency_2 == 'Fishing Season'){
+     'ts_fs_S'}
+      else if(input$Region_2 == 'Western Coast' & input$Frequency_2 == 'Weeks'){
+     'ts_w_W'}
+      else if(input$Region_2 == 'Western Coast' & input$Frequency_2 == 'Months'){
+     'ts_m_W'}
+      else if(input$Region_2 == 'Western Coast' & input$Frequency_2 == 'Quarters'){
+     'ts_q_W'}
+      else if(input$Region_2 == 'Western Coast' & input$Frequency_2 == 'Years'){
+     'ts_y_W'}
+      else if(input$Region_2 == 'Western Coast' & input$Frequency_2 == 'Fishing Season'){
+     'ts_fs_W'})})
+
+Freq_2 = reactive({
+  if(input$Frequency_2 == 'Weeks'){
+    52}
+  else if(input$Frequency_2 == 'Months'){
+    12}
+  else if(input$Frequency_2 == 'Quarters'){
+    4}
+  else if(input$Frequency_2 == 'Years'){
+    1}
+  else if(input$Frequency_2 == 'Fishing Season'){
+    1}
+  })
+
+dts.train = reactive({head(dados_2(), (length(dados_2())-input$cutoff))})
+
+m1 = reactive({Arima(dts.train(), order = c(input$p,input$d,input$q),
+                     seasonal=list(order=c(input$P,input$D,input$Q),
+                                   period=as.numeric(Freq_2())))})
+
+m1.f = reactive({forecast(m1(),
+                          h=input$cutoff)})  
+  
+```
+
+### AIC
+
+```{r}
+renderValueBox({
+  aic =  m1()['aic']$aic %>% round(2)
+  valueBox(
+    value = aic,
+    icon = "fa-area-chart",
+    color = "primary"
+  )
+})
+```
+
+
+
+Column
+-----------------------------------------------------------------------
+
+### ACF and pACF
+
+```{r}
+
+renderPlot({
+  # dados = get(ifelse(input$Region == 'Southern Coast',
+  #                'ts_m_S',
+  #                'ts_m_W'))
+  
+  if(input$diff != 0){
+    dados_acf = reactive({diff(dados_2(), input$diff)})
+  }
+  else{
+    dados_acf = reactive({dados_2()})
+  }
+  
+  astsa::acf2(dados_acf(), max.lag = input$maxlag)
+  
+})
+```
+
+### SARIMA
+
+```{r}
+renderPrint(m1())
+```
+
+
+Row
+-----------------------------------------------------------------------
+
+### Forecast
+
+```{r}
+renderPlot({
+par(mfrow = c(1,2))
+plot(dados_2(), col = 'red', xlim = c(2010,2022))
+plot(m1.f(), xlim = c(2010,2022))
+})
+```
+
+
 
 CMSY++ {data-icon="fa-home"}
 ================================
@@ -67,7 +242,7 @@ Column {.sidebar}
 
 ### Inputs
 
-```{r, include = F}
+```{r, include = T}
 selectInput('cmsy_region',
             label = 'Region',
             choices = c('1-Western Coast','2-Southern Coast'),
@@ -407,14 +582,512 @@ traceEllipse<-function(rs,ks,prior.r,prior.k){
 #---------------------------------------------
 # END OF FUNCTIONS
 #---------------------------------------------
-
-cat("-------------------------------------------\n")
-cat("CMSY++ Analysis,", date(),"\n")
-cat("-------------------------------------------\n")
+# 
+# cat("-------------------------------------------\n")
+# cat("CMSY++ Analysis,", date(),"\n")
+# cat("-------------------------------------------\n")
 
 ```
 
+Row { data-height=20 }
+--------------------------------
 
+### Portuguese Coast, 1995-2022
+```{r, eval = FALSE}
+cdat = catch
+cinfo = id
+id_file = 'train_occ' #artificio para ultrapassar a distincao train/sim que o script faz abaixo
+load(file = nn_file) # load neural network file
+
+reactive({
+if(is.na(stocks()[1])==TRUE){
+  # stocks         <- as.character(cinfo$Stock) # Analyze stocks in sequence of ID file
+  # stocks         <- sort(as.character(cinfo$Stock[cinfo$Stock>="Cras_vir_Virginian"])) # Analyze in alphabetic order after a certain stock
+   stocks         <- sort(as.character(cinfo$Stock)) # Analyze stocks in alphabetic order
+  # stocks         <- as.character(cinfo$Stock[cinfo$btype!="None" & cinfo$Stock>"Squa_aca_BlackSea"]) # Analyze stocks by criteria in ID file
+}
+})
+
+
+# cat("Processing",stock,",", as.character(cinfo$ScientificName[cinfo$Stock==stock]),"\n")
+
+  #retrospective analysis
+  retros.nyears<-ifelse(retros==T,3,0) #retrospective analysis
+  FFmsy.retrospective<-list() #retrospective analysis
+  BBmsy.retrospective<-list() #retrospective analysis
+  years.retrospective<-list() #retrospective analysis
+
+  retrosp.step =0
+  for (retrosp.step in 0:retros.nyears){ #retrospective analysis loop
+
+  # Declare conditional Objects that feature with ifelse clauses
+    B.sel        <- NULL
+    B.Bmsy.sel   <- NULL
+    F.sel        <- NULL
+    F.Fmsy.sel   <- NULL
+    true.MSY     <- NULL
+    true.r       <- NULL
+    true.k       <- NULL
+    true.Bk      <- NULL
+    true.F_Fmsy  <- NULL
+    true.q       <- NULL
+
+  # assign data from cinfo to vectors
+    btype        <- reactive({as.character(cinfo()$btype[cinfo()$Stock==stock])})
+    res          <- reactive({as.character(cinfo()$Resilience[cinfo()$Stock==stock])})
+    start.yr     <- reactive({as.numeric(cinfo()$StartYear[cinfo()$Stock==stock])})
+    end.yr       <- reactive({as.numeric(cinfo()$EndYear[cinfo()$Stock==stock])})
+    end.yr.orig  <- end.yr
+    end.yr 	     <- end.yr-retrosp.step #retrospective analysis
+    yr           <- reactive({as.numeric(cdat()$yr[cdat()$Stock==stock & cdat()$yr >= start.yr & cdat()$yr <= end.yr])})
+    if(length(yr)==0){
+      cat("ERROR: Could not find the stock in the Catch file -
+      check that the stock names match in ID and Catch files and that commas are used (not semi-colon)")
+      return (NA) }
+
+    # code to change start year to avoid ambiguity in biomass prior -----------------------------------------
+    ct.raw       <- reactive({as.numeric(cdat()$ct[cdat()$Stock==stock & cdat()$yr >= start.yr & cdat()$yr <= end.yr])/1000 }) ## assumes that catch is given in tonnes, transforms to '000 tonnes
+    ct           <- reactive({ksmooth(x=yr,y=ct.raw(),kernel="normal",n.points=length(yr),bandwidth=bw)$y})
+    ct.3         <- reactive({mean(ct()[1:3])})
+    max.ct       <- reactive({max(ct)})
+
+    if(btype=="biomass" | btype=="CPUE" ) {
+      bt.raw1 <- reactive({as.numeric(cdat()$bt[cdat()$Stock==stock & cdat()$yr >= start.yr & cdat()$yr <= end.yr])})
+      # if bt.raw is zero, change to NA
+      reactive({bt.raw1()[bt.raw1()==0] <- NA})
+      if(btype=="biomass") { # make sure both catch and biomass are divided by 1000
+        bt <- reactive({bt.raw1/1000}) } else { # get number of integer digits for bt.raw (because sometimes they give numbers of eggs!)
+          bt.digits <- reactive({floor(log10(mean(bt.raw1(),na.rm=T)))+1})
+          reactive({if(bt.digits()>3) {bt.raw <- bt.raw1()/10^(bt.digits()-1)})} else {bt.raw <- reactive({bt.raw1})}
+          bt     <- reactive({bt.raw}) #ksmooth(x=yr,y=bt.raw,kernel="normal",n.points=length(yr),bandwidth=3)$y
+        } # end of bt==CPUE loop
+      if(length(bt[is.na(bt)==F])==0) {
+        cat("ERROR: No CPUE or biomass data in the Catch input file")
+        return (NA) }
+    } else {bt <- NA; bt.raw <- NA} # if there is no biomass or CPUE, set bt to NA
+
+
+    # code to change start year to avoid ambiguity in biomass prior -----------------------------------------
+    start.yr.new <- NA # initialize / reset start.yr.new with NA
+    if(is.na(cinfo$stb.low[cinfo$Stock==stock]) & ct.3 < (0.33*max.ct) & start.yr < 2000 & (btype=="None" || yr[is.na(bt)==F][1]>yr[3])) { # it is unlikely that a fishery started on an unexploited stock after 2000
+      start.yr.new <- yr[which(ct >= (0.4*max.ct))][1]
+      cat("\n          *****************************************************************************************
+          Attention: Low catch in",start.yr,"may indicate either depleted or unexploited biomass.
+          Set startbio in ID file to 0.01-0.2 or 0.8-1.0 to indicate depleted or unexploited biomass.\n")
+      if(auto.start==T) { # change start year automatically if auto.start is TRUE
+        start.yr  <- start.yr.new
+        cat("          Meanwhile start year was set to",start.yr,"to avoid ambiguity.\n")
+      } else {
+        cat("          Else, set start year in ID file to",start.yr.new,"to avoid uncertainty\n")
+      }
+      cat("          ******************************************************************************************\n\n") }
+    # end of code for start biomass prior ambiguity
+
+    ename        <- cinfo$Name[cinfo$Stock==stock]
+    r.low        <- as.numeric(cinfo$r.low[cinfo$Stock==stock])
+    r.hi         <- as.numeric(cinfo$r.hi[cinfo$Stock==stock])
+    stb.low      <- as.numeric(cinfo$stb.low[cinfo$Stock==stock])
+    stb.hi       <- as.numeric(cinfo$stb.hi[cinfo$Stock==stock])
+    int.yr       <- as.numeric(cinfo$int.yr[cinfo$Stock==stock])
+    intb.low     <- as.numeric(cinfo$intb.low[cinfo$Stock==stock])
+    intb.hi      <- as.numeric(cinfo$intb.hi[cinfo$Stock==stock])
+    endb.low     <- as.numeric(cinfo$endb.low[cinfo$Stock==stock])
+    endb.hi      <- as.numeric(cinfo$endb.hi[cinfo$Stock==stock])
+    e.creep      <- as.numeric(cinfo$e.creep[cinfo$Stock==stock])
+    force.cmsy   <- cinfo$force.cmsy[cinfo$Stock==stock]
+    comment      <- as.character(cinfo$Comment[cinfo$Stock==stock])
+    source       <- as.character(cinfo$Source[cinfo$Stock==stock])
+    # set global defaults for uncertainty
+    sigR         <- sigmaR
+    # for simulated data only
+    if(substr(id_file,1,3)=="Sim") {
+      true.MSY     <- cinfo$true.MSY[cinfo$Stock==stock]/1000
+      true.r       <- cinfo$true.r[cinfo$Stock==stock]
+      true.k       <- cinfo$true.k[cinfo$Stock==stock]/1000
+      true.Bk      <- (cinfo$last.TB[cinfo$Stock==stock]/1000)/true.k
+      true.F_Fmsy  <- cinfo$last.F_Fmsy[cinfo$Stock==stock]
+      true.q       <- cinfo$last.cpue[cinfo$Stock==stock]/cinfo$last.TB[cinfo$Stock==stock]
+    }
+    # do retrospective analysis
+    if (retros==T && retrosp.step==0){
+      cat("* ",ifelse(btype!="None","BSM","CMSY")," retrospective analysis for ",
+          stock," has been enabled\n",sep="") #retrospective analysis
+    }
+    if (retros==T){
+      cat("* Retrospective analysis: step n. ",(retrosp.step+1),"/",(retros.nyears+1),
+          ". Range of years: [",start.yr ," - ",end.yr,"]\n",sep="") #retrospective analysis
+    }
+
+    # -------------------------------------------------------------
+    # check for common errors
+    #--------------------------------------------------------------
+    if(length(btype)==0){
+      cat("ERROR: Could not find the stock in the ID input file - check that the stock names match in ID and Catch files and that commas are used (not semi-colon)")
+      return (NA) }
+    if(start.yr < cdat$yr[cdat$Stock==stock][1]){
+      cat("ERROR: start year in ID file before first year in catch file\n")
+      return (NA)
+      break}
+    if(length(yr)==0){
+      cat("ERROR: Could not find the stock in the Catch input files - Please check that the code is written correctly")
+      return (NA) }
+    if(btype %in% c("None","CPUE","biomass")==FALSE){
+      cat("ERROR: In ID file, btype must be None, CPUE, or biomass.")
+      return (NA) }
+    if(retros==F & length(yr) != (end.yr-start.yr+1)) {
+      cat("ERROR: indicated year range is of different length than years in catch file\n")
+      return (NA)}
+    if(length(ct.raw[ct.raw>0])==0) {
+      cat("ERROR: No catch data in the Catch input file")
+      #return (NA)
+      next }
+    if(is.na(int.yr)==F & (int.yr < start.yr | int.yr > end.yr)) {
+      cat("ERROR: year for intermediate B/k prior outside range of years")
+      return (NA)}
+    if(is.na(int.yr)==T & (is.na(intb.low)==F | is.na(intb.hi)==F)) {
+        cat("ERROR: intermediate B/k prior given without year")
+        return (NA)}
+
+    # apply correction for effort-creep to commercial(!) CPUE
+    if(btype=="CPUE" && is.na(e.creep)==FALSE) {
+      cpue.first  <- min(which(is.na(bt)==F))
+      cpue.last   <- max(which(is.na(bt)==F))
+      cpue.length <- cpue.last - cpue.first
+      bt.cor      <- bt
+      for(i in 1:(cpue.length)) {
+        bt.cor[cpue.first+i]  <- bt[cpue.first+i]*(1-e.creep/100)^i # equation for decay in %
+      }
+      bt <- bt.cor
+    }
+
+    if(retros==T && force.cmsy == F && (btype !="None" & length(bt[is.na(bt)==F])<nab) ) { #stop retrospective analysis if cpue is < nab
+      cat("Warning: Cannot run retrospective analysis for ",end.yr,", number of remaining ",btype," values is too low (<",nab,")\n",sep="")
+      #retrosp.step<-retros.nyears
+      break }
+
+    if(is.na(mean(ct.raw))){
+      cat("ERROR: Missing value in Catch data; fill or interpolate\n")
+    }
+    nyr          <- length(yr) # number of years in the time series
+
+
+    # initialize vectors for viable r, k, bt, and all in a matrix
+    mdat.all    <- matrix(data=vector(),ncol=2+nyr+1)
+
+    # initialize other vectors anew for each stock
+    current.attempts <- NA
+
+    # use start.yr if larger than select year
+    if(is.na(select.yr)==F) {
+      sel.yr <- ifelse(start.yr > select.yr,start.yr,select.yr)
+    } else sel.yr <- NA
+
+    #----------------------------------------------------
+    # Determine initial ranges for parameters and biomass
+    #----------------------------------------------------
+    if(!(res %in% c("High","Medium","Low","Very low"))) {
+      cat("ERROR: Resilience not High, Medium, Low, or Very low in ID input file")
+      return (NA)} else {
+    # initial range of r from input file
+    if(is.na(r.low)==F & is.na(r.hi)==F) {
+      prior.r <- c(r.low,r.hi)
+    } else
+      # initial range of r based on resilience
+      if(res == "High") {
+        prior.r <- c(0.6,1.5)} else if(res == "Medium") {
+          prior.r <- c(0.2,0.8)}    else if(res == "Low") {
+            prior.r <- c(0.05,0.5)}  else { # i.e. res== "Very low"
+              prior.r <- c(0.015,0.1)}
+    }
+    gm.prior.r      <- exp(mean(log(prior.r))) # get geometric mean of prior r range
+
+    #-----------------------------------------
+    # determine MSY prior
+    #-----------------------------------------
+    # get index of years with lowest and highest catch
+    min.yr.i     <- which.min(ct)
+    max.yr.i     <- which.max(ct)
+    yr.min.ct    <- yr[min.yr.i]
+    yr.max.ct    <- yr[max.yr.i]
+    min.ct       <- ct[min.yr.i]
+    max.ct       <- ct[max.yr.i]
+    min_max      <- min.ct/max.ct
+    mean.ct      <- mean(ct)
+    sd.ct        <- sd(ct)
+
+    ct.sort     <- sort(ct.raw)
+    # if max catch is reached in last 5 years or catch is flat, assume MSY=max catch
+    if(max.yr.i>(nyr-4) || ((sd.ct/mean.ct) < 0.1 && min_max > 0.66)) {
+        MSY.pr <- mean(ct.sort[(nyr-2):nyr]) } else {
+          MSY.pr <- 0.75*mean(ct.sort[(nyr-4):nyr]) } # else, use fraction of mean of 5 highest catches as MSY prior
+
+    #><>MSY: MSY prior
+    sd.log.msy.pr <- 0.3 # rounded upward to account for reduced variability in selected stocks
+    log.msy.pr    <- log(MSY.pr)
+    prior.msy     <- c(exp(log.msy.pr-1.96*sd.log.msy.pr),exp(log.msy.pr+1.96*sd.log.msy.pr))
+    init.msy      <- MSY.pr
+
+    #----------------------------------------------------------------
+    # Multivariate normal sampling of r-k log space
+    #----------------------------------------------------------------
+    # turn numerical ranges into log-normal distributions
+    mean.log.r=mean(log(prior.r))
+    sd.log.r=(log(prior.r[2])-log(prior.r[1]))/(2*1.96)  # assume range covers 4 SD
+
+    #><>MSY: new k = r-msy space
+    # generate msy and r independently
+    ri1     <- rlnorm(n,mean.log.r,sd.log.r)
+    msyi1  <- rlnorm(n,log.msy.pr,sd.log.msy.pr)
+    ki1     <- msyi1*4/ri1
+    #><>MSY: get log median and covariance
+    cov_rk <- cov(cbind(log(ri1),log(ki1)))
+    mu_rk <-  apply(cbind(log(ri1),log(ki1)),2,median)
+    rk.cor <- cov_rk[2,1] #MSY: correlation rho input to JAGS
+    #><>MSY: mvn prior for k = 4*msy/r
+    mvn.log.rk <- rmvnorm(n,mean=mu_rk,cov_rk)
+
+    ri2    <- exp(mvn.log.rk[,1])
+    ki2    <- exp(mvn.log.rk[,2])
+
+    mean.log.k <- median(log(ki1))
+    sd.log.k.pr <- sd(log(ki1))
+    # quick check must be the same
+    sd.log.k = sqrt(cov_rk[2,2])
+    sd.log.k.pr
+    sd.log.k
+    #><>MSY: k.prior
+    prior.k     <- exp(mean.log.k-1.96*sd.log.k.pr) # declare variable and set prior.k[1] in one step
+    prior.k[2]  <- exp(mean.log.k+1.96*sd.log.k.pr)
+    msy.init <- exp(mean.log.k)
+
+    #-----------------------------------------
+    # determine prior B/k ranges
+    #-------------------------------------------------
+    # determine intermediate year int.yr for prior B/k
+    if(is.na(cinfo$int.yr[cinfo$Stock==stock])==F) {
+      int.yr <- cinfo$int.yr[cinfo$Stock==stock]     # use int.yr give by user
+    } else {if(min_max > 0.7) { # if catch is about flat, use middle year as int.yr
+      int.yr    <- as.integer(mean(c(start.yr, end.yr)))
+      } else { # only consider catch 5 years away from end points and within last 30 years # 50
+      yrs.int       <- yr[yr>(yr[nyr]-30) & yr>yr[4] & yr<yr[nyr-4]]
+      ct.int        <- ct[yr>(yr[nyr]-30) & yr>yr[4] & yr<yr[nyr-4]]
+      min.ct.int    <- min(ct.int)
+      min.ct.int.yr <- yrs.int[which.min(ct.int)]
+      max.ct.int    <- max(ct.int)
+      max.ct.int.yr <- yrs.int[which.max(ct.int)]
+      #if min year is after max year, use min year for int year
+      if(min.ct.int.yr > max.ct.int.yr) { int.yr <- min.ct.int.yr } else {
+        # if min.ct/max.ct after max.ct < 0.7, use that year for int.yr
+        min.ct.after.max <- min(ct.int[yrs.int >= max.ct.int.yr])
+        if((min.ct.after.max/max.ct.int) < 0.75) {
+          int.yr <- yrs.int[yrs.int > max.ct.int.yr & ct.int==min.ct.after.max]
+        } else {int.yr <- min.ct.int.yr}
+      }
+      # get latest year where ct < 1.2 min ct
+      # int.yr        <- max(yrs.int[ct.int<=(1.2*min.ct.int)])
+     }
+    }# end of int.yr loop
+
+    # get additional properties of catch time series
+    mean.ct.end       <- mean(ct.raw[(nyr-4):nyr]) # mean of catch in last 5 years
+    mean.ct_MSY.end   <- mean.ct.end/MSY.pr
+    # Get slope of catch in last 10 years
+    ct.last           <- ct[(nyr-9):nyr]/mean(ct) # last catch standardized by mean catch
+    yrs.last          <- seq(1:10)
+    fit.last          <- lm(ct.last ~ yrs.last)
+    slope.last        <- as.numeric(coefficients(fit.last)[2])
+    slope.last.nrm    <- (slope.last - slope.last.min)/(slope.last.max - slope.last.min) # normalized slope 0-1
+    # Get slope of catch in first 10 years
+    ct.first          <- ct[1:10]/mean.ct # catch standardized by mean catch
+    yrs.first         <- seq(1:10)
+    fit.first         <- lm(ct.first ~ yrs.first)
+    slope.first       <- as.numeric(coefficients(fit.first)[2])
+    slope.first.nrm   <- (slope.first - slope.first.min)/(slope.first.max - slope.first.min) # normalized slope 0-1
+
+    ct_max.1          <- ct[1]/max.ct
+    ct_MSY.1          <- ct[1]/MSY.pr
+    mean.ct_MSY.start <- mean(ct.raw[1:5])/MSY.pr
+    ct_MSY.int        <- ct[which(yr==int.yr)]/MSY.pr
+    ct_max.end        <- ct[nyr]/max.ct
+    ct_MSY.end        <- ct[nyr]/MSY.pr
+    max.ct.i          <- which.max(ct)/nyr
+    int.ct.i          <- which(yr==int.yr)/nyr
+    min.ct.i          <- which.min(ct)/nyr
+    yr.norm           <- (nyr - yr.norm.min)/(yr.norm.max - yr.norm.min) # normalize nyr 0-1
+
+    # classify catch patterns as Flat, LH, LHL, HL, HLH or OTH
+    if(min_max >=0.45 & ct_max.1 >= 0.45 & ct_max.end >= 0.45) { Flat <- 1 } else Flat <- 0
+    if(min_max<0.25 & ct_max.1<0.45 & ct_max.end>0.45) { LH <- 1 } else LH <- 0
+    if(min_max<0.25 & ct_max.1 < 0.45 & ct_max.end < 0.25) { LHL <- 1 } else LHL <- 0
+    if(min_max<0.25 & ct_max.1 > 0.5 & ct_max.end < 0.25) { HL <- 1 } else HL <- 0
+    if(min_max<0.25 & ct_max.1 >= 0.45 & ct_max.end >= 0.45) { HLH <- 1 } else HLH <- 0
+    if(sum(c(Flat,LHL,LH,HL,HLH))<1) { OTH <- 1 } else OTH <- 0
+
+    # Compute predictions for start, end, and int Bk with trained neural networks
+    # B/k range that contains 90% of the data points if ct/MSY.pr >= 1
+    bk.MSY <- c(0.256 , 0.721 ) # based on all ct/MSY.pr data for 400 stocks # data copied from Plot_ct_MSY_13.R output
+    CL.1   <- c( 0.01 , 0.203 )
+    CL.2   <- c( 0.2 , 0.431 )
+    CL.3   <- c( 0.8 , -0.45 )
+    CL.4   <- c( 1.02 , -0.247 )
+
+    # estimate startbio
+    # if ct/MSY.pr >= ct_MSY.lim use bk.MSY range
+    if(mean.ct_MSY.start >= ct_MSY.lim) {
+      startbio    <- bk.MSY
+    } else { # else run neural network to determine whether B/k is above or below 0.5
+        nninput.start  <- as.data.frame(cbind(Flat,LH,LHL,HL,HLH,OTH,min_max,max.ct.i,min.ct.i,yr.norm, #ct_MSY.1,
+                                          mean.ct_MSY.start,slope.first.nrm,mean.ct_MSY.end,slope.last.nrm)) #gm.prior.r
+        pr.nn.startbio <- compute(nn.startbio, nninput.start)
+        pr.nn_indices.startbio <- max.col(pr.nn.startbio$net.result)
+        ct_MSY.use     <- ifelse(ct_MSY.1 < mean.ct_MSY.start,ct_MSY.1,mean.ct_MSY.start)
+        if(pr.nn_indices.startbio==1) { # if nn predicts B/k below 0.5
+          startbio      <- c(CL.1[1]+CL.1[2]*mean.ct_MSY.start,CL.2[1]+CL.2[2]*mean.ct_MSY.start) } else {
+            startbio      <- c(CL.3[1]+CL.3[2]*mean.ct_MSY.start,CL.4[1]+CL.4[2]*mean.ct_MSY.start) }
+    } # end of neural network loop
+
+    # estimate intbio
+    if(ct_MSY.int >= ct_MSY.lim) {
+      intbio    <- bk.MSY
+    } else { # else run neural network to determine whether B/k is above or below 0.5
+    nninput.int    <- as.data.frame(cbind(Flat,LH,LHL,HL,HLH,OTH, # shapes
+                                          min_max,max.ct.i,min.ct.i,yr.norm, # general
+                                          int.ct.i,ct_MSY.int,                   # int
+                                          mean.ct_MSY.end,slope.last.nrm,        # end
+                                          mean.ct_MSY.start,slope.first.nrm))     # start
+
+    pr.nn.intbio   <- compute(nn.intbio, nninput.int)
+    pr.nn_indices.intbio <- max.col(pr.nn.intbio$net.result)
+    if(pr.nn_indices.intbio==1){ # if nn predicts B/k below 0.5
+      intbio      <- c(CL.1[1]+CL.1[2]*ct_MSY.int,CL.2[1]+CL.2[2]*ct_MSY.int) } else {
+          intbio    <- c(CL.3[1]+CL.3[2]*ct_MSY.int,CL.4[1]+CL.4[2]*ct_MSY.int)}
+    } # end of nn loop
+
+    # estimate endbio
+      # if ct/MSY.pr >= ct_MSY.lim use bk.MSY range
+      if(mean.ct_MSY.end >= ct_MSY.lim) {
+        endbio    <- bk.MSY
+      } else { # else run neural network to determine whether B/k is above or below 0.5
+         nninput.end    <- as.data.frame(cbind(Flat,LH,LHL,HL,HLH,OTH,ct_MSY.int,min_max,max.ct.i,  # arbitrary best sequence
+                                               int.ct.i,min.ct.i,yr.norm,
+                                               mean.ct_MSY.start,slope.first.nrm,mean.ct_MSY.end,slope.last.nrm))
+         pr.nn.endbio   <- compute(nn.endbio, nninput.end)
+         pr.nn_indices.endbio <- max.col(pr.nn.endbio$net.result)
+         ct_MSY.use    <- ifelse(ct_MSY.end < mean.ct_MSY.end,ct_MSY.end,mean.ct_MSY.end)
+         if(pr.nn_indices.endbio==1){ # if nn predicts B/k below 0.5
+          endbio      <- c(CL.1[1]+CL.1[2]*ct_MSY.use,CL.2[1]+CL.2[2]*ct_MSY.use) } else {
+            endbio      <- c(CL.3[1]+CL.3[2]*ct_MSY.use,CL.4[1]+CL.4[2]*ct_MSY.use)}
+
+  } # end of nn loop
+
+    # -------------------------------------------------------
+    # if abundance data are available, use to set B/k priors
+    #--------------------------------------------------------
+    # The following assumes that max smoothed cpue will not exceed carrying capacity and will
+    # not be less than a quarter of carrying capacity
+
+    if(btype != "None") {
+      # get length, min, max, min/max ratio of smoothed bt data
+      start.bt      <- yr[which(bt>0)[1]]
+      end.bt        <- yr[max(which(bt>0))]
+      yr.bt         <- seq(from=start.bt,to=end.bt,by=1) #range of years with bt data
+      bt.no.na      <- approx(bt[yr>=start.bt & yr<=end.bt],n=length(yr.bt))$y
+      bt.sm         <- ksmooth(x=yr.bt,y=bt.no.na,kernel="normal",n.points=length(yr.bt),bandwidth=bw)$y
+      min.bt.sm     <- min(bt.sm,na.rm=T)
+      max.bt.sm     <- max(bt.sm,na.rm=T)
+      yr.min.bt.sm  <- yr.bt[which.min(bt.sm)]
+      yr.max.bt.sm  <- yr.bt[bt.sm==max.bt.sm]
+
+    # The prior B/k bounds derived from cpue are Bk.cpue.pr.low = 0.25 * cpue/max.cpue
+    # and Bk.cpue.pr.hi = 1.0 * cpue/max.cpue
+      if(bt4pr == T) { # if B/k priors shall be estimated from CPUE...
+      # if cpue is available in first 3 years, use to set startbio
+      if(is.na(stb.low)==T & is.na(stb.hi)==T & start.bt <= yr[3]) {
+          startbio.bt <- c(0.25*bt.sm[1]/max.bt.sm,bt.sm[1]/max.bt.sm)
+          # if first catch is low and cpue close to max, assume unexploited stock
+          if(ct[1]/max.ct < 0.2 & bt.sm[1]/max.bt.sm > 0.8) {startbio.bt <- c(0.8,1)}
+
+        # use startbio estimated from bt only if it is narrower or similar to startbio estimated by the neural network
+        if((1.25*(startbio[2]-startbio[1])) >  (startbio.bt[2]-startbio.bt[1])) {
+          startbio <- startbio.bt }
+
+      } # end of startbio loop
+
+      # use min cpue to set intbio (ignore years close to start or end)
+      if(is.na(intb.low)==T & is.na(intb.hi)==T) {
+        st.33     <- ifelse(start.bt<(start.yr+3),start.yr+3,start.bt) # first year eligible for intbio
+        end.33    <- ifelse(end.bt>(end.yr-3),end.yr-3,end.bt) # last year eligible for intbio
+        bt.33     <- bt.sm[yr.bt>=st.33 & yr.bt<=end.33] # CPUE values relevant for intbio
+        yr.bt.33  <- seq(from=st.33,to=end.33,by=1) # range of years with relevant bt data
+        min.bt.33 <- min(bt.33,na.rm=T) # mimimum of relevant bt
+        int.yr.bt <- yr.bt.33[bt.33==min.bt.33] # year with min bt
+        intbio.bt <- c(0.25*min.bt.33/max.bt.sm,min.bt.33/max.bt.sm) # intbio prior predicted for int.yr.bt
+
+        # if mean catch/MSY before int.yr is high (> 0.8), use narrower range
+        ct.MSY.prev  <- mean(ct[yr>=(int.yr-4) & yr<=int.yr])/MSY.pr
+        if(ct.MSY.prev > 0.8) { intbio.bt <- c(1.2*intbio.bt[1],0.8*intbio.bt[2]) }
+        # if cpue range is narrow, use lower intbio
+        if(min.bt.sm/max.bt.sm>0.3) {intbio.bt <- c(0.8*intbio.bt[1],0.8*intbio.bt[2]) }
+
+        # use intbio estimated from bt only if it is narrower or similar to intbio estimated by the neural network
+        if((1.25*(intbio[2]-intbio[1])) >=  (intbio.bt[2]-intbio.bt[1])) {
+          int.yr   <- int.yr.bt
+          intbio   <- intbio.bt }
+
+      } # end of intbio loop
+
+      # if cpue is within last 3 years of time series, use to set endbio
+      if(is.na(endb.low)==T & is.na(endb.hi)==T) {
+        if(end.bt >= yr[nyr-2]) {
+          endbio.bt  <- c(0.25*bt.sm[yr.bt==end.bt]/max.bt.sm,bt.sm[yr.bt==end.bt]/max.bt.sm)
+          # if mean catch/MSY before end.yr is high (> 0.8), use narrower range,
+          # because with high previous catch, biomass can neither be very low nor near k
+          ct.MSY.prev  <- mean(ct[yr>=(end.yr-4) & yr<=end.yr])/MSY.pr
+          if(ct.MSY.prev > 0.8) { endbio.bt <- c(1.2*endbio.bt[1],0.8*endbio.bt[2]) }
+          # if endbio estimated by neural network is low and cpue is well below max, use endbio
+          if(mean(endbio.bt)>mean(endbio) & mean(endbio)<0.3 & bt.sm[yr.bt==end.bt]/max.bt.sm < 0.7) {endbio.bt <- endbio}
+          # if cpue range is narrow, use lower endbio
+          if(min.bt.sm/max.bt.sm>0.3) {endbio.bt <- c(0.8*endbio.bt[1],0.8*endbio.bt[2]) }
+
+        # use endbio estimated from bt only if it is narrower or similar to endbio estimated by the neural network
+          if((1.25*(endbio[2]-endbio[1])) >  (endbio.bt[2]-endbio.bt[1])) {
+            endbio   <- endbio.bt }
+        }
+      } # end of endbio loop
+     } # end of b/k prior loop
+    } # end of bt priors loop
+
+  # if user defined B/k priors in the ID file, use those
+    if(is.na(stb.low)==F & is.na(stb.hi)==F) {startbio <- c(stb.low,stb.hi)}
+    if(is.na(intb.low)==F & is.na(intb.hi)==F) {
+      int.yr   <- cinfo$int.yr[cinfo$Stock==stock]
+      intbio   <- c(intb.low,intb.hi)}
+    if(is.na(endb.low)==F & is.na(endb.hi)==F) {endbio   <- c(endb.low,endb.hi)}
+
+  cat("startbio=",startbio,ifelse(is.na(stb.low)==T,"default","expert"),
+      ", intbio=",int.yr,intbio,ifelse(is.na(intb.low)==T,"default","expert"),
+      ", endbio=",endbio,ifelse(is.na(endb.low)==T,"default","expert"),"\n")
+
+  #----------------------------------------------------------------
+  # Multivariate normal sampling of r-k log space
+  #----------------------------------------------------------------
+  # turn numerical ranges into log-normal distributions
+
+  mean.log.r=mean(log(prior.r))
+  sd.log.r=(log(prior.r[2])-log(prior.r[1]))/4  # assume range covers 4 SD
+
+  mean.log.k <- mean(log(prior.k))
+  sd.log.k   <- (log(prior.k[2])-log(prior.k[1]))/4 # assume range covers 4 SD
+
+  mvn.log.rk <- mvn(n=n,mean.log.r=mean.log.r,sd.log.r=sd.log.r,mean.log.k=mean.log.k,sd.log.k=sd.log.k)
+  #><>MSY rk based on empirical mvn
+  ri.emp     <- exp(mvn.log.rk[,1])
+  ki1.emp    <- exp(mvn.log.rk[,2])
+
+}
+
+
+```
 
 
 JABBA {data-icon="fa-home"}
@@ -495,7 +1168,7 @@ valueBox(paste("Octopus Fisheries in Portugal"),
 ```
 
 
-Row {data-width=325}
+Column {data-width=325}
 --------------------------------
 
 ### Grafico sexy
@@ -511,6 +1184,144 @@ jbplot_spphase(bet_total(), add = T)
 ```
 
 
+SPICT {data-icon="fa-home"}
+================================
+
+Column {.sidebar}
+-----------------------------------------------------------------------
+
+```{r}
+selectInput('region_spict',
+            label = 'Region',
+            choices = c('1-Western Coast','2-Southern Coast'),
+            selected = '1-Southern Coast')
+selectInput('fleet_spict',
+            label = 'Fleet',
+            choices = c('1-Polyvalent', '2-Bottom Trawl'),
+            selected = '1-Polyvalent')
+
+textInput('logbkfrac',
+            label = 'logbkfrac',
+            value = "log(0.8),0.5,1")
+numericInput('logn',
+            label = 'Shape (p)',
+            value = 2)
+textInput('logalpha',
+            label = 'log(alpha)',
+            value = "1,1,0")
+textInput('logbeta',
+            label = 'log(beta)',
+            value = "1,1,0")
+
+timeC = reactive({df_effort_y %>%
+    as.data.frame() %>%
+     filter(EGRUPART == input$fleet_spict & regiao == input$region_spict) %>%
+    ungroup() %>%
+    # select(year_sale) %>% 
+    transmute(year_sale = as.character(year_sale)) %>% pull%>% as.numeric 
+ })
+
+timeI = reactive({df_effort_y %>%
+    # as.data.frame() %>% 
+     filter(EGRUPART == input$fleet_spict & regiao == input$region_spict) %>%
+    ungroup() %>%
+    # select(year_sale) %>% 
+    transmute(year_sale = as.character(year_sale)) %>% pull %>% as.numeric 
+ })
+
+obsC = reactive({df_effort_y %>% 
+                     filter(EGRUPART == input$fleet_spict & regiao == input$region_spict) %>%
+    ungroup() %>% 
+                  select(catch) %>% pull %>% as.numeric })
+                
+obsI = reactive({df_effort_y %>% 
+                     filter(EGRUPART == input$fleet_spict & regiao == input$region_spict) %>%
+    ungroup() %>% 
+                  select(lpue) %>% pull %>% as.numeric })
+
+modelo_spict = reactive({
+  list(timeC = timeC(),
+       timeI = timeC(),
+       obsC = obsC(),
+       obsI = obsI(),
+       priors = list(logbkfrac = strsplit(input$logbkfrac,",") %>%
+                    unlist %>% 
+                    sapply(., function(x) eval(parse(text=x)))  %>% unname(),
+                     logalpha = strsplit(input$logalpha, ",") %>%
+                    unlist %>% 
+                    sapply(., function(x) eval(parse(text=x)))  %>% unname(),
+                     logbeta = strsplit(input$logbeta,",") %>%
+                    unlist %>% 
+                    sapply(., function(x) eval(parse(text=x)))  %>% unname()),
+       ini = list(logn = log(input$logn)),
+       phases = list(logn = -1))
+  })
+
+res_spict = reactive({fit.spict(modelo_spict())}) 
+retro_res = reactive({retro(res_spict())})
+```
+
+Column {data-width=500}
+-------------------------------------
+
+### Diagnostics
+
+```{r, eval = T}
+# reactive({print(modelo_spict())})
+renderPlot({
+plotspict.diagnostic(calc.osa.resid(res_spict()))
+})
+```
+
+Column {data-width=500}
+-------------------------------------
+
+### Biomass
+
+```{r, eval = T}
+renderPlot({
+plotspict.biomass(res_spict(), qlegend = F)
+})  
+# reactive({
+#   print(retro_res())
+#   })
+```
+
+### Biomass
+
+```{r, eval = T}
+renderPlot({
+plotspict.ffmsy(res_spict(), qlegend = F)
+})  
+# reactive({
+#   print(retro_res())
+#   })
+```
+
+Column {data-width=500}
+-------------------------------------
+
+### Painel
+
+```{r, eval = T}
+renderPlot({
+par(mfrow = c(2,1))
+# plotspict.bbmsy(res_spict(), qlegend = F)
+# plotspict.ffmsy(res_spict(), qlegend = F)
+plotspict.fb(res_spict())
+plotspict.production(res_spict(), n.plotyears = 40)
+})
+```
+
+Column {data-width=500}
+-------------------------------------
+
+### Retro
+
+```{r, eval = t}
+renderPlot({
+plotspict.retro(retro_res())
+})
 ```
 
 
