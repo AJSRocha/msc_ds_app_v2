@@ -1,11 +1,11 @@
 ---
-title: "Octopus trend simulator 3000"
+title: "Stock assessment tools testing for Octopus vulgaris"
 output: 
   flexdashboard::flex_dashboard:
     theme: lumen
     # temas: default, cerulean, journal, flatly, darkly, readable, spacelab, 
       # united, cosmo, lumen, paper, sandstone, simplex, yeti
-    orientation: columns
+  
     vertical_layout: fill
     social: ["twitter", "facebook", "menu"]
     name: 'IPMA'
@@ -51,16 +51,20 @@ library(JABBA)
 # usado para spict
 library(TMB)
 library(spict)
+
+# usado para catdyn
+library(CatDyn)
 ```
 
 ```{r load_data}
 load('./app_data/box_jenkins.Rdata')
 load('./app_data/data.Rdata')
+load('./app_data/CatDyn_data.Rdata')
 
 # Devemos acrescentar 'runtime:shiny' para correr imediatamente a app; para fazer knit e produzir os html necessarios para o github pages, basta tirar essa linha. Quando se reinstala ou actualiza algum package, reiniciar Rstudio antes de fazer publish se não ocorre um bug com as contas.
 ```
 
-SARIMA {data-icon="fa-home"}
+SARIMA {data-icon="fa-home" data-orientation=rows}
 ================================
 
 Column {.sidebar}
@@ -98,7 +102,7 @@ numericInput('D',
             value = 0)
 ```
 
-Row
+Column
 -----------------------------------------------------------------------
 
 ### Controls_1
@@ -188,7 +192,7 @@ renderValueBox({
 
 
 
-Column
+Row
 -----------------------------------------------------------------------
 
 ### ACF and pACF
@@ -219,7 +223,7 @@ renderPrint(m1())
 ```
 
 
-Row
+Column
 -----------------------------------------------------------------------
 
 ### Forecast
@@ -1090,7 +1094,7 @@ if(is.na(stocks()[1])==TRUE){
 ```
 
 
-JABBA {data-icon="fa-home"}
+JABBA {data-icon="fa-home"  data-orientation=rows}
 ================================
 
 Column {.sidebar}
@@ -1162,16 +1166,30 @@ Row { data-height=20 }
 --------------------------------
 
 ### Portuguese Coast, 1995-2022
+
 ```{r}
 valueBox(paste("Octopus Fisheries in Portugal"),
-         color="steelblue")
+         color="primary")
 ```
 
+### MSY
+
+```{r}
+
+renderValueBox({
+  jabba_msy = bet_total()$refpts$msy[1] %>% round(2)
+  valueBox(
+    value = jabba_msy,
+    icon = "fa-area-chart",
+    color = "primary"
+  )
+})
+```
 
 Column {data-width=325}
 --------------------------------
 
-### Grafico sexy
+### Plots
 
 ```{r}
 renderPlot({
@@ -1184,7 +1202,7 @@ jbplot_spphase(bet_total(), add = T)
 ```
 
 
-SPICT {data-icon="fa-home"}
+SPiCT {data-icon="fa-home"}
 ================================
 
 Column {.sidebar}
@@ -1316,6 +1334,20 @@ plotspict.production(res_spict(), n.plotyears = 40)
 Column {data-width=500}
 -------------------------------------
 
+### MSY
+
+```{r}
+renderValueBox({
+  spict_msy = res_spict()$report$MSY %>% round(2)
+  valueBox(
+    value = spict_msy,
+    icon = "fa-area-chart",
+    color = "primary"
+  )
+})
+```
+
+
 ### Retro
 
 ```{r, eval = t}
@@ -1323,5 +1355,345 @@ renderPlot({
 plotspict.retro(retro_res())
 })
 ```
+
+Prelim {data-navmenu="CatDyn" data-icon="fa-home"}
+================================
+
+Column {.sidebar}
+-----------------------------------------------------------------------
+
+```{r}
+
+selectInput('region_catdyn',
+            label = 'Region',
+            choices = c('1-Western Coast','2-Southern Coast'),
+            selected = '1-Southern Coast')
+# 
+# selectInput('fleet_catdyn',
+#             label = 'Fleet',
+#             choices = c('1-Polyvalent', '2-Bottom Trawl'),
+#             selected = '1-Polyvalent')
+
+# numericInput('catdyn_p',
+#             label = 'p',
+#             value = 1)
+# numericInput('catdyn_p',
+#             label = 'M',
+#             value = 1/52)
+# numericInput('catdyn_N0',
+#             label = 'N0',
+#             value = 15000)
+# numericInput('catdyn_Pini',
+#             label = 'P.ini',
+#             value = 1000)
+# numericInput('catdyn_kini',
+#             label = 'K.ini',
+#             value = 0.01)
+# numericInput('catdyn_alpha_ini',
+#             label = 'alpha',
+#             value = 0.5)
+# numericInput('catdyn_beta_ini',
+#             label = 'beta',
+#             value = 0.5)
+# numericInput('catdyn_P',
+#             label = 'P',
+#             value = 43)
+# selectInput('catdyn_distr',
+#             label = 'distr',
+#             choices = c('gamma', 'negbin','normal','lognormal'),
+#             selected = 'negbin')
+# selectInput('catdyn_method',
+#             label = 'method',
+#             choices = c('CG', 'Nelder-Mead','BFGS','spg'),
+#             selected = 'CG')
+# numericInput('catdyn_itnmax',
+#             label = 'max interations',
+#             value = 100000)
+# numericInput('catdyn_disp',
+#             label = 'disp',
+#             value = 50)
+
+# trialer = function(data, p,M, N0.ini, P.ini, k.ini,
+#                    alpha.ini, beta.ini, P,
+#                    distr, method, itnmax, disp = list()){
+#  
+#   pars.ini = log(c(M,
+#                    N0.ini,
+#                    unlist(P.ini),
+#                    k.ini,
+#                    alpha.ini,
+#                    beta.ini,
+#                    unlist(disp)))
+#   
+#   dates = c(head(data$Data[[1]]$time.step,1),
+#            unlist(P),
+#            tail(data$Data[[1]]$time.step,1))
+#   
+#   res = list()
+#   
+#   res$pre_fit = catdynexp(x=data,
+#                           p=p,
+#                           par=pars.ini,
+#                           dates=dates,
+#                           distr=distr)
+#   
+#   res$fit = CatDynFit(x = data,
+#                   p = p,
+#                   par = pars.ini,
+#                   dates = dates,
+#                   distr = distr,
+#                   method = method,
+#                   itnmax = itnmax)
+#   
+#   res$pred = CatDynPred(res$fit,method)
+#   
+#   return(res)
+# }
+# 
+# plotador = function(data, model, pre = T, post1 = T, post2 = T){
+#   if(pre){
+#   plot.CatDynData(data,
+#                 mark = T,
+#                 offset = c(0,1,10),
+#                 hem = 'N')}
+#   if(post1){
+#   plot(x=model$pre_fit,
+#      leg.pos="topright",
+#      Biom.tstep=7,
+#      Cat.tstep=120,
+#      Biom.xpos=0.4,
+#      Biom.ypos=0,
+#      Cat.xpos=0.4,
+#      Cat.ypos=0.1)}
+#   
+#   if(post2){
+#   plot(x=model$pred,
+#        leg.pos="topright",
+#        Biom.tstep=7,
+#        Cat.tstep=10,
+#        Biom.xpos=0.18,
+#        Biom.ypos=0.1,
+#        Cat.xpos=0.18,
+#        Cat.ypos=0.2)}
+    
+# }
+
+data_cat =
+reactive({
+   get(
+  if(input$region_catdyn == '1-Western Coast') {
+    'cat_w_22'}
+  else{data_cat = 'cat_s_22'})
+})
+
+```
+
+Row 
+-----------------------------------------------------------------------
+
+### Preliminar Plot
+
+```{r}
+renderPlot({
+plot.CatDynData(x = data_cat(),
+                mark = T,
+                offset = c(0,1,10),
+                hem = 'N')
+})
+
+# reactive({print(data_cat())})
+```
+
+Model {data-navmenu="CatDyn" data-icon="fa-home"}
+================================
+
+Column {.sidebar}
+-----------------------------------------------------------------------
+
+```{r}
+
+# selectInput('fleet_catdyn',
+#             label = 'Fleet',
+#             choices = c('1-Polyvalent', '2-Bottom Trawl'),
+#             selected = '1-Polyvalent')
+
+numericInput('catdyn_p',
+            label = 'p',
+            value = 1)
+numericInput('catdyn_M',
+            label = 'M',
+            value = 1/52)
+numericInput('catdyn_N0',
+            label = 'N0',
+            value = 15000)
+numericInput('catdyn_Pini',
+            label = 'P.ini',
+            value = 1000)
+numericInput('catdyn_kini',
+            label = 'K.ini',
+            value = 0.01)
+numericInput('catdyn_alpha_ini',
+            label = 'alpha',
+            value = 0.5)
+numericInput('catdyn_beta_ini',
+            label = 'beta',
+            value = 0.5)
+numericInput('catdyn_P2',
+            label = 'P',
+            value = 43)
+selectInput('catdyn_distr',
+            label = 'distr',
+            choices = c('gamma', 'negbin','normal','lognormal'),
+            selected = 'gamma')
+selectInput('catdyn_method',
+            label = 'method',
+            choices = c('CG', 'Nelder-Mead','BFGS','spg'),
+            selected = 'CG')
+numericInput('catdyn_itnmax',
+            label = 'max interations',
+            value = 100000)
+numericInput('catdyn_disp',
+            label = 'disp',
+            value = 50)
+
+# trialer = function(data, p, M, N0.ini, P.ini, k.ini,
+#                    alpha.ini, beta.ini, P,
+#                    distr, method, itnmax, disp = list()){
+# 
+#   pars.ini = log(c(M,
+#                    N0.ini,
+#                    unlist(P.ini),
+#                    k.ini,
+#                    alpha.ini,
+#                    beta.ini,
+#                    unlist(disp)))
+# 
+#   dates = c(head(data$Data[[1]]$time.step,1),
+#            unlist(P),
+#            tail(data$Data[[1]]$time.step,1))
+# 
+#   res = list()
+# 
+#   res$pre_fit = catdynexp(x=data,
+#                           p=p,
+#                           par=pars.ini,
+#                           dates=dates,
+#                           distr=distr)
+# 
+#   res$fit = CatDynFit(x = data,
+#                   p = p,
+#                   par = pars.ini,
+#                   dates = dates,
+#                   distr = distr,
+#                   method = method,
+#                   itnmax = itnmax)
+# 
+#   res$pred = CatDynPred(res$fit,method)
+# 
+#   return(res)
+# }
+
+plotador = function(data, model, pre = T, post1 = T, post2 = T){
+  if(pre){
+  plot.CatDynData(data,
+                mark = T,
+                offset = c(0,1,10),
+                hem = 'N')}
+  if(post1){
+  plot(x=model$pre_fit,
+     leg.pos="topright",
+     Biom.tstep=7,
+     Cat.tstep=120,
+     Biom.xpos=0.4,
+     Biom.ypos=0,
+     Cat.xpos=0.4,
+     Cat.ypos=0.1)}
+
+  if(post2){
+  plot(x=model$pred,
+       leg.pos="topright",
+       Biom.tstep=7,
+       Cat.tstep=10,
+       Biom.xpos=0.18,
+       Biom.ypos=0.1,
+       Cat.xpos=0.18,
+       Cat.ypos=0.2)}
+
+}
+
+# fit_22 = reactive({
+#   trialer(data_cat(),
+#         p = input$catdyn_p,
+#         M = input$catdyn_M,
+#         N0.ini = input$catdyn_N0,
+#         P.ini = list(input$catdyn_Pini),
+#         k.ini = input$catdyn_kini,
+#         alpha.ini = input$catdyn_alpha_ini,
+#         beta.ini  = input$catdyn_beta_ini,
+#         P = list(input$catdyn_P),
+#         distr = input$catdyn_distr,
+#         method = input$catdyn_method,
+#         itnmax = input$catdyn_itnmax,
+#         disp = input$catdyn_dips)})
+
+
+  pars.ini = reactive({log(c(input$catdyn_M,
+                   input$catdyn_N0,
+                   unlist(input$catdyn_Pini),
+                   input$catdyn_kini,
+                   input$catdyn_alpha_ini,
+                   input$catdyn_beta_ini,
+                   unlist(input$catdyn_disp)))})
+
+  dates = reactive({c(head(data_cat()$Data[[1]]$time.step,1),
+           unlist(input$catdyn_P2),
+           tail(data_cat()$Data[[1]]$time.step,1))})
+
+  
+
+  
+
+  fit_22 =reactive({CatDynFit(x = data_cat(),
+                  p = as.numeric(input$catdyn_p),
+                  par = pars.ini(),
+                  dates = dates(),
+                  distr = input$catdyn_distr,
+                  method = input$catdyn_method,
+                  itnmax = input$catdyn_itnmax)})
+```
+
+Column
+-----------------------------------------------------------------------
+
+### Output
+
+```{r}
+#funcao plotadora nao esta a funcionar
+
+
+    
+  # reactive({print(fit_22())})
+  # reactive({
+  #   str(input$catdyn_distr)
+  #   print(input$catdyn_distr)
+  #   })
+  #   
+    
+renderPlot({
+  # plotador(data_cat(), fit_22(), F, T, F)
+  plot(x=fit_22(),
+     leg.pos="topright",
+     Biom.tstep=7,
+     Cat.tstep=120,
+     Biom.xpos=0.4,
+     Biom.ypos=0,
+     Cat.xpos=0.4,
+     Cat.ypos=0.1)
+    })
+    
+
+
+```
+
 
 
